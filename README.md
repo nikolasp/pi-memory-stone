@@ -8,17 +8,13 @@ A global pi extension that preserves and retrieves useful memory across pi sessi
 
 ## Quick Start
 
-Install globally as a pi package:
+Install globally from npm:
 
 ```bash
-pi install git:github.com/nikolasp/pi-memory-stone
+pi install npm:pi-memory-stone
 ```
 
-Or install manually in pi's global extension directory:
-
-```bash
-git clone https://github.com/nikolasp/pi-memory-stone ~/.pi/agent/extensions/pi-memory-stone
-```
+Package page: https://www.npmjs.com/package/pi-memory-stone
 
 Then restart pi or run `/reload`, and verify it is active:
 
@@ -26,13 +22,23 @@ Then restart pi or run `/reload`, and verify it is active:
 /memory-status
 ```
 
-> Scope note: `pi install -l ...` / `pi install --local ...` writes to the current project's `.pi/settings.json` and only loads there. For all projects, run `pi install git:github.com/nikolasp/pi-memory-stone` without `--local` (user settings) or use `~/.pi/agent/extensions/`.
+Alternative installs:
+
+```bash
+# Install directly from GitHub
+pi install git:github.com/nikolasp/pi-memory-stone
+
+# Manual global extension checkout
+git clone https://github.com/nikolasp/pi-memory-stone ~/.pi/agent/extensions/pi-memory-stone
+```
+
+> Scope note: `pi install -l ...` / `pi install --local ...` writes to the current project's `.pi/settings.json` and only loads there. For all projects, run `pi install npm:pi-memory-stone` without `--local` (user settings) or use `~/.pi/agent/extensions/`.
 
 ## Architecture
 
 ```
 ~/.pi/agent/memory/memory.db      # SQLite + FTS5 (WAL mode)
-~/.pi/agent/extensions/pi-memory-stone/
+pi-memory-stone package source
 ├── src/
 │   ├── index.ts                  # Entry point: hooks, lifecycle
 │   ├── db/                       # SQLite connection, migrations, CRUD

@@ -1,7 +1,6 @@
 {
   "name": "pi-memory-stone",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "description": "Global pi extension: preserves and retrieves useful memory across pi sessions",
   "license": "MIT",
