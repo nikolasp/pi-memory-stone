@@ -380,8 +380,8 @@ describe("formatInjectionForLlm", () => {
 
     const formatted = formatInjectionForLlm(packet, 1000);
     assert.ok(formatted.includes("Memory: loaded"));
-    assert.ok(formatted.includes("[decision]"));
-    assert.ok(formatted.includes("[preference]"));
+    assert.ok(formatted.includes("[decision ref=abc]"));
+    assert.ok(formatted.includes("[preference ref=def]"));
     assert.ok(formatted.includes("/memory-forget"));
   });
 

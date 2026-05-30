@@ -189,7 +189,7 @@ export function buildInjectionPacket(results: RankedResult[]): InjectionPacket {
     header: `Memory: loaded ${items.length} relevant items from past sessions. These may help provide context.`,
     items,
     footer:
-      "If any memory is irrelevant or conflicting, mention it and I can /memory-forget it.",
+      "Use memory_open with a ref for full text. If any memory is irrelevant or conflicting, mention it and I can /memory-forget <ref> it.",
     recordCount: items.length,
   };
 }
@@ -202,7 +202,7 @@ export function formatInjectionForLlm(packet: InjectionPacket, maxTokens = 1000)
   let usedChars = lines.join("\n").length;
 
   for (const item of packet.items) {
-    const itemHeader = `[${item.kind}]`;
+    const itemHeader = `[${item.kind} ref=${item.ref}]`;
     const itemText = item.text.slice(0, 300); // Truncate per item
     const itemFooter = item.staleHint ? `  ${item.staleHint}` : "";
     const itemLine = `${itemHeader} ${itemText}${itemFooter}`;

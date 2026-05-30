@@ -8,12 +8,25 @@ A global pi extension that preserves and retrieves useful memory across pi sessi
 
 ## Quick Start
 
-The extension auto-discovers from `~/.pi/agent/extensions/pi-memory-stone/`. No install step needed — just restart pi or run `/reload`.
+Install globally as a pi package:
 
 ```bash
-# Verify it's active
+pi install git:github.com/nikolasp/pi-memory-stone
+```
+
+Or install manually in pi's global extension directory:
+
+```bash
+git clone https://github.com/nikolasp/pi-memory-stone ~/.pi/agent/extensions/pi-memory-stone
+```
+
+Then restart pi or run `/reload`, and verify it is active:
+
+```bash
 /memory-status
 ```
+
+> Scope note: `pi install -l ...` / `pi install --local ...` writes to the current project's `.pi/settings.json` and only loads there. For all projects, run `pi install git:github.com/nikolasp/pi-memory-stone` without `--local` (user settings) or use `~/.pi/agent/extensions/`.
 
 ## Architecture
 
@@ -202,7 +215,10 @@ Storage: `~/.pi/agent/memory/memory.db` (SQLite, WAL mode, busy timeout 5s).
 ```bash
 cd ~/.pi/agent/extensions/pi-memory-stone
 npm test
+npm run typecheck
 ```
+
+These scripts are also runnable from a pi package clone installed from git; the required script runners are regular dependencies because pi package installs omit `devDependencies`.
 
 44 tests across 4 suites:
 
