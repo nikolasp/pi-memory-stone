@@ -8,7 +8,7 @@
  *  - SQLite schema + migrations
  *  - Deterministic turn_summary and file_activity capture on agent_end
  *  - FTS5 search
- *  - /memory-status, /memory-search, /memory-last commands
+ *  - /memory-status, /memory-search, /memory-open, /memory-inject, /memory-last commands
  *  - memory_search, memory_open, memory_remember, memory_forget tools
  *  - Conservative same-project before_agent_start injection
  */
@@ -19,7 +19,8 @@ import { registerTools } from "./tools/index.js";
 import { indexSessionOnAgentEnd } from "./indexing/index.js";
 import { retrieve, buildInjectionPacket, formatInjectionForLlm } from "./retrieval/index.js";
 import { getProjectId, getConfig, clearProjectCache } from "./config/index.js";
-import { closeDb } from "./db/index.js";
+import { closeDb, getRecord, insertInjection } from "./db/index.js";
+import { getMemorySessionState, manualRecordsToRankedResults } from "./session-state/index.js";
 import { createHash } from "node:crypto";
 
 // ─── Session-scoped state ───────────────────────────────────────────
@@ -72,62 +73,54 @@ export default function (pi: ExtensionAPI) {
       const config = getConfig(ctx.cwd);
       if (!config.enabled) return;
 
-      // Check for session toggle entries before honoring the cached toggle so
-      // /memory-on can re-enable injection after /memory-off in the same session.
-      for (const entry of ctx.sessionManager.getBranch()) {
-        if (
-          entry.type === "custom" &&
-          entry.customType === "memory-stone:session-toggle"
-        ) {
-          const data = entry.data as { enabled?: boolean } | undefined;
-          if (typeof data?.enabled === "boolean") {
-            sessionEnabled = data.enabled;
-          }
-        }
-      }
+      const sessionState = getMemorySessionState(ctx.sessionManager.getBranch());
+      sessionEnabled = sessionState.enabled;
 
       if (!sessionEnabled) return;
 
       const prompt = event.prompt || "";
-      if (!prompt.trim()) return;
-
-      // Hash prompt to detect repeated injections
       const promptHash = createHash("sha256").update(prompt).digest("hex").slice(0, 12);
-
       const projectId = getProjectId(ctx.cwd);
+      const injectionMode = sessionState.injectionMode ?? config.injectionMode;
 
-      // Build search query
-      const results = retrieve(prompt, projectId, [], {
-        limit: config.maxInjectedRecords,
-        crossProjectEnabled: config.crossProjectEnabled,
-      });
+      const manualRecords = sessionState.manualRefs
+        .map((ref) => getRecord(ref))
+        .filter((record): record is NonNullable<typeof record> => Boolean(record));
+      const manualResults = manualRecordsToRankedResults(manualRecords, projectId);
+      const manualRefSet = new Set(manualResults.map((r) => r.record.id));
 
-      // Filter: skip already-injected refs
-      const newResults = results.filter((r) => !injectedRefsThisSession.has(r.record.id));
+      let autoResults: ReturnType<typeof retrieve> = [];
+      if (injectionMode === "auto" && prompt.trim()) {
+        const results = retrieve(prompt, projectId, [], {
+          limit: config.maxInjectedRecords,
+          crossProjectEnabled: config.crossProjectEnabled,
+        });
 
-      // Score threshold
-      const thresholdResults = newResults.filter((r) => r.score >= config.scoreThreshold);
+        autoResults = results
+          .filter((r) => !manualRefSet.has(r.record.id))
+          .filter((r) => !injectedRefsThisSession.has(r.record.id))
+          .filter((r) => r.score >= config.scoreThreshold);
+      }
 
-      if (thresholdResults.length === 0) return;
+      const selectedResults = [...manualResults, ...autoResults];
+      if (selectedResults.length === 0) return;
 
-      // Build and format injection packet
-      const packet = buildInjectionPacket(thresholdResults);
+      const packet = buildInjectionPacket(selectedResults);
       const formatted = formatInjectionForLlm(packet, config.maxInjectedTokens);
 
-      // Track injected refs (prevent feedback loop)
-      for (const r of thresholdResults) {
+      // Track only search-selected refs. Manually chosen refs are intentionally
+      // injected on every turn until /memory-clear-injected is used.
+      for (const r of autoResults) {
         injectedRefsThisSession.add(r.record.id);
       }
 
-      // Log injection to DB
-      const { insertInjection } = await import("./db/index.js");
       insertInjection({
         session_id: ctx.sessionManager.getSessionId(),
         turn_entry_id: ctx.sessionManager.getLeafId() ?? undefined,
         prompt_hash: promptHash,
-        injected_refs: thresholdResults.map((r) => r.record.id).join(","),
+        injected_refs: selectedResults.map((r) => r.record.id).join(","),
         packet: formatted,
-        reasons: thresholdResults.map((r) => r.reasons.join(";")).join(" | "),
+        reasons: selectedResults.map((r) => r.reasons.join(";")).join(" | "),
       });
 
       // Inject as a non-context audit custom entry (separate from LLM context)
@@ -156,17 +149,7 @@ export default function (pi: ExtensionAPI) {
       sessionEnabled = true;
 
       // Restore session toggle from branch
-      for (const entry of ctx.sessionManager.getBranch()) {
-        if (
-          entry.type === "custom" &&
-          entry.customType === "memory-stone:session-toggle"
-        ) {
-          const data = entry.data as { enabled?: boolean } | undefined;
-          if (typeof data?.enabled === "boolean") {
-            sessionEnabled = data.enabled;
-          }
-        }
-      }
+      sessionEnabled = getMemorySessionState(ctx.sessionManager.getBranch()).enabled;
 
       // Clear project ID cache on session change
       clearProjectCache();

@@ -8,6 +8,7 @@ import { execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import type { InjectionMode } from "../session-state/index.js";
 
 // ─── Project identity ───────────────────────────────────────────────
 
@@ -51,6 +52,8 @@ export interface MemoryConfig {
   scoreThreshold: number;
   /** Whether cross-project injection is enabled */
   crossProjectEnabled: boolean;
+  /** Search-based automatic injection, or only explicit /memory-inject refs */
+  injectionMode: InjectionMode;
   /** Extra ignore patterns */
   ignorePatterns: string[];
 }
@@ -61,6 +64,7 @@ const DEFAULT_CONFIG: MemoryConfig = {
   maxInjectedTokens: 1000,
   scoreThreshold: 0.3,
   crossProjectEnabled: false,
+  injectionMode: "auto",
   ignorePatterns: [],
 };
 
@@ -80,6 +84,9 @@ export function getConfig(cwd: string = process.cwd()): MemoryConfig {
       const settings = JSON.parse(raw);
       if (settings.memory) {
         const config = { ...DEFAULT_CONFIG, ...settings.memory };
+        if (config.injectionMode !== "auto" && config.injectionMode !== "manual") {
+          config.injectionMode = DEFAULT_CONFIG.injectionMode;
+        }
         _configCache.set(cacheKey, config);
         return config;
       }

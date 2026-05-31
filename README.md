@@ -69,10 +69,12 @@ Every time the agent finishes a response, the extension:
 Before each agent turn, the extension:
 
 - Builds a focused query from the user's prompt
-- Searches records via FTS5
+- Uses `memory.injectionMode` to choose automatic or manual injection
+- In `auto` mode, searches records via FTS5
 - Ranks by hybrid score: FTS match + same-project boost + recency decay + kind weight + confidence
-- Injects top results (max 5, threshold-limited) as system prompt context
-- Tracks injected refs to prevent feedback loops
+- Injects top results (max 5, threshold-limited) plus any refs selected with `/memory-inject`
+- In `manual` mode, skips search and injects only refs selected with `/memory-inject`
+- Tracks auto-injected refs to prevent feedback loops
 - Logs every injection for audit via `/memory-last`
 
 ### 3. Storage Model
@@ -102,6 +104,10 @@ Before each agent turn, the extension:
 | `/memory-status` | `/stone-status` | Show index statistics, record counts by kind, config |
 | `/memory-status --verbose` | | Include per-kind record breakdown |
 | `/memory-search <query>` | `/stone-search` | Search memory for relevant records |
+| `/memory-open <id>` | `/stone-open` | Open a specific memory record by reference ID |
+| `/memory-inject <id> [id ...]` | `/stone-inject` | Manually inject specific refs into future turns this session |
+| `/memory-clear-injected` | `/stone-clear-injected` | Clear manually injected refs for this session |
+| `/memory-mode <auto\|manual>` | `/stone-mode` | Override injection mode for this session |
 | `/memory-last` | `/stone-last` | Show the last memory injection packet |
 | `/memory-forget <id>` | `/stone-forget` | Soft-forget a record (hide from searches) |
 | `/memory-forget <id> --hard` | | Permanently delete (with confirmation) |
@@ -226,7 +232,7 @@ npm run typecheck
 
 These scripts are also runnable from a pi package clone installed from git; the required script runners are regular dependencies because pi package installs omit `devDependencies`.
 
-44 tests across 4 suites:
+48 tests across 5 test files:
 
 | Suite | Tests | Focus |
 |---|---|---|
@@ -234,6 +240,7 @@ These scripts are also runnable from a pi package clone installed from git; the 
 | `privacy.test.ts` | 17 | Secret redaction, sensitive path filtering |
 | `parser.test.ts` | 10 | Turn parsing, file activity detection, error extraction |
 | `ranking.test.ts` | 16 | Hybrid ranking, cross-project filtering, injection formatting |
+| `session-state.test.ts` | 4 | Injection mode config, session ref selection, manual-only injection |
 
 ## Configuration
 
@@ -246,10 +253,20 @@ Project settings in `.pi/settings.json`:
     "maxInjectedRecords": 5,
     "maxInjectedTokens": 1000,
     "scoreThreshold": 0.3,
-    "crossProjectEnabled": false
+    "crossProjectEnabled": false,
+    "injectionMode": "auto"
   }
 }
 ```
+
+`injectionMode` accepts:
+
+| Value | Behavior |
+|---|---|
+| `auto` | Default. Automatically searches relevant memories and also includes refs selected with `/memory-inject`. |
+| `manual` | Disables automatic search-based injection. Only refs selected with `/memory-inject` are injected. |
+
+For manual-only memory, keep `enabled: true` and set `injectionMode: "manual"`.
 
 ## Deferred (Future Slices)
 

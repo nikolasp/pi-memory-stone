@@ -1,11 +1,20 @@
 /**
- * Commands: /memory-status, /memory-search, /memory-last
+ * Commands: /memory-status, /memory-search, /memory-open, /memory-inject, /memory-mode, /memory-last
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { getStats, getLastInjection } from "../db/index.js";
+import { getStats, getLastInjection, getRecord } from "../db/index.js";
 import { retrieve } from "../retrieval/index.js";
 import { getProjectId, getConfig } from "../config/index.js";
+import {
+  INJECTION_MODE_ENTRY,
+  MANUAL_INJECTION_ENTRY,
+  SESSION_TOGGLE_ENTRY,
+  getMemorySessionState,
+  isInjectionMode,
+  isRecordVisibleInProject,
+  parseRefArgs,
+} from "../session-state/index.js";
 
 export function registerCommands(pi: ExtensionAPI): void {
   // ── /memory-status ──────────────────────────────────────────────
@@ -37,6 +46,70 @@ export function registerCommands(pi: ExtensionAPI): void {
     description: "Alias for /memory-search",
     handler: async (args, ctx) => {
       await handleMemorySearch(args, ctx);
+    },
+  });
+
+  // ── /memory-open ────────────────────────────────────────────────
+
+  pi.registerCommand("memory-open", {
+    description: "Open a specific memory record by reference ID",
+    handler: async (args, ctx) => {
+      await handleMemoryOpen(args, ctx);
+    },
+  });
+
+  pi.registerCommand("stone-open", {
+    description: "Alias for /memory-open",
+    handler: async (args, ctx) => {
+      await handleMemoryOpen(args, ctx);
+    },
+  });
+
+  // ── /memory-inject / /memory-clear-injected ────────────────────
+
+  pi.registerCommand("memory-inject", {
+    description: "Manually inject specific memory refs into future turns",
+    handler: async (args, ctx) => {
+      await handleMemoryInject(args, ctx, pi);
+    },
+  });
+
+  pi.registerCommand("stone-inject", {
+    description: "Alias for /memory-inject",
+    handler: async (args, ctx) => {
+      await handleMemoryInject(args, ctx, pi);
+    },
+  });
+
+  pi.registerCommand("memory-clear-injected", {
+    description: "Clear manually injected memory refs for this session",
+    handler: async (_args, ctx) => {
+      pi.appendEntry(MANUAL_INJECTION_ENTRY, { action: "clear" });
+      ctx.ui.notify("Cleared manually injected memory refs for this session", "info");
+    },
+  });
+
+  pi.registerCommand("stone-clear-injected", {
+    description: "Alias for /memory-clear-injected",
+    handler: async (_args, ctx) => {
+      pi.appendEntry(MANUAL_INJECTION_ENTRY, { action: "clear" });
+      ctx.ui.notify("Cleared manually injected memory refs for this session", "info");
+    },
+  });
+
+  // ── /memory-mode ────────────────────────────────────────────────
+
+  pi.registerCommand("memory-mode", {
+    description: "Set memory injection mode for this session: auto or manual",
+    handler: async (args, ctx) => {
+      await handleMemoryMode(args, ctx, pi);
+    },
+  });
+
+  pi.registerCommand("stone-mode", {
+    description: "Alias for /memory-mode",
+    handler: async (args, ctx) => {
+      await handleMemoryMode(args, ctx, pi);
     },
   });
 
@@ -79,7 +152,7 @@ export function registerCommands(pi: ExtensionAPI): void {
     handler: async (_args, ctx) => {
       ctx.ui.notify("Memory injection enabled for this session", "info");
       // Session toggle — stored in extension state
-      pi.appendEntry("memory-stone:session-toggle", { enabled: true });
+      pi.appendEntry(SESSION_TOGGLE_ENTRY, { enabled: true });
     },
   });
 
@@ -87,7 +160,7 @@ export function registerCommands(pi: ExtensionAPI): void {
     description: "Disable memory injection for this session",
     handler: async (_args, ctx) => {
       ctx.ui.notify("Memory injection disabled for this session", "info");
-      pi.appendEntry("memory-stone:session-toggle", { enabled: false });
+      pi.appendEntry(SESSION_TOGGLE_ENTRY, { enabled: false });
     },
   });
 }
@@ -119,7 +192,11 @@ async function handleMemoryStatus(args: string, ctx: ExtensionCommandContext): P
   lines.push(`    enabled: ${config.enabled}`);
   lines.push(`    maxInjectedRecords: ${config.maxInjectedRecords}`);
   lines.push(`    maxInjectedTokens: ${config.maxInjectedTokens}`);
+  const sessionState = getMemorySessionState(ctx.sessionManager.getBranch());
   lines.push(`    crossProjectEnabled: ${config.crossProjectEnabled}`);
+  lines.push(`    injectionMode: ${config.injectionMode}`);
+  lines.push(`    effectiveInjectionMode: ${sessionState.injectionMode ?? config.injectionMode}`);
+  lines.push(`    manuallyInjectedRefs: ${sessionState.manualRefs.length > 0 ? sessionState.manualRefs.join(", ") : "none"}`);
 
   if (ctx.hasUI) {
     ctx.ui.notify(lines.join("\n"), "info");
@@ -167,6 +244,102 @@ async function handleMemorySearch(args: string, ctx: ExtensionCommandContext): P
   if (ctx.hasUI) {
     ctx.ui.notify(lines.join("\n"), "info");
   }
+}
+
+async function handleMemoryOpen(args: string, ctx: ExtensionCommandContext): Promise<void> {
+  const refId = args?.trim().split(/\s+/).filter(Boolean)[0];
+
+  if (!refId) {
+    ctx.ui.notify("Usage: /memory-open <ref-id>", "warning");
+    return;
+  }
+
+  const record = getRecord(refId);
+  if (!record) {
+    ctx.ui.notify(`Memory record ${refId} not found.`, "warning");
+    return;
+  }
+
+  const currentProjectId = getProjectId(ctx.cwd);
+  if (record.status !== "active" || !isRecordVisibleInProject(record, currentProjectId)) {
+    ctx.ui.notify(`Memory record ${refId} is not available.`, "warning");
+    return;
+  }
+
+  const lines: string[] = [];
+  lines.push(`Memory Record: ${record.id}`);
+  lines.push(`Kind: ${record.kind}`);
+  lines.push(`Scope: ${record.scope}`);
+  lines.push(`Project: ${record.project_id ?? "global"}`);
+  lines.push(`Created: ${new Date(record.created_at).toISOString()}`);
+  lines.push(`Status: ${record.status}`);
+  lines.push("");
+  lines.push(record.text);
+
+  ctx.ui.notify(lines.join("\n"), "info");
+}
+
+async function handleMemoryInject(args: string, ctx: ExtensionCommandContext, pi: ExtensionAPI): Promise<void> {
+  const refIds = parseRefArgs(args);
+
+  if (refIds.length === 0) {
+    ctx.ui.notify("Usage: /memory-inject <ref-id> [ref-id ...]", "warning");
+    return;
+  }
+
+  const currentProjectId = getProjectId(ctx.cwd);
+  const acceptedRefs: string[] = [];
+  const rejectedRefs: string[] = [];
+
+  for (const refId of refIds) {
+    const record = getRecord(refId);
+    if (record && record.status === "active" && isRecordVisibleInProject(record, currentProjectId)) {
+      acceptedRefs.push(refId);
+    } else {
+      rejectedRefs.push(refId);
+    }
+  }
+
+  if (acceptedRefs.length > 0) {
+    pi.appendEntry(MANUAL_INJECTION_ENTRY, { action: "add", refs: acceptedRefs });
+  }
+
+  const lines: string[] = [];
+  if (acceptedRefs.length > 0) {
+    lines.push(`Manually injected memory refs for this session: ${acceptedRefs.join(", ")}`);
+  }
+  if (rejectedRefs.length > 0) {
+    lines.push(`Unavailable refs skipped: ${rejectedRefs.join(", ")}`);
+  }
+
+  ctx.ui.notify(lines.join("\n") || "No memory refs were injected.", acceptedRefs.length > 0 ? "info" : "warning");
+}
+
+async function handleMemoryMode(args: string, ctx: ExtensionCommandContext, pi: ExtensionAPI): Promise<void> {
+  const mode = args?.trim().split(/\s+/).filter(Boolean)[0];
+  const config = getConfig(ctx.cwd);
+  const sessionState = getMemorySessionState(ctx.sessionManager.getBranch());
+
+  if (!mode) {
+    ctx.ui.notify(
+      `Memory injection mode: ${sessionState.injectionMode ?? config.injectionMode}\nUsage: /memory-mode <auto|manual>`,
+      "info",
+    );
+    return;
+  }
+
+  if (!isInjectionMode(mode)) {
+    ctx.ui.notify("Usage: /memory-mode <auto|manual>", "warning");
+    return;
+  }
+
+  pi.appendEntry(INJECTION_MODE_ENTRY, { mode });
+  ctx.ui.notify(
+    mode === "manual"
+      ? "Memory injection mode set to manual for this session. Use /memory-inject <ref-id> to choose memories."
+      : "Memory injection mode set to auto for this session.",
+    "info",
+  );
 }
 
 async function handleMemoryLast(ctx: ExtensionCommandContext): Promise<void> {
