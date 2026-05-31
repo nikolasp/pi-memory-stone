@@ -242,11 +242,15 @@ export function upsertRecord(record: {
   status?: RecordStatus;
   confidence?: number;
   importance?: number;
+  created_at?: number;
+  updated_at?: number;
   superseded_by?: string | null;
   derived_from_memory_refs?: string | null;
 }): string {
   const db = getDb();
   const now = Date.now();
+  const createdAt = record.created_at ?? now;
+  const updatedAt = record.updated_at ?? now;
   const scope = record.scope ?? "project";
   const projectId = scope === "global" ? null : (record.project_id ?? null);
   const redactedText = redactSecrets(record.text);
@@ -276,7 +280,7 @@ export function upsertRecord(record: {
       redactedTags,
       record.confidence ?? 1.0,
       record.importance ?? 0.5,
-      now,
+      updatedAt,
       record.status ?? existing.status,
       record.superseded_by ?? null,
       record.derived_from_memory_refs ?? null,
@@ -303,8 +307,8 @@ export function upsertRecord(record: {
       record.status ?? "active",
       record.confidence ?? 1.0,
       record.importance ?? 0.5,
-      now,
-      now,
+      createdAt,
+      updatedAt,
       record.superseded_by ?? null,
       record.derived_from_memory_refs ?? null,
     );
@@ -329,6 +333,14 @@ export function getRecord(id: string): RecordRow | undefined {
   return (
     (db.prepare("SELECT * FROM records WHERE id = ?").get(id) as RecordRow | undefined) ?? undefined
   );
+}
+
+export function listRecords(options: { includeInactive?: boolean } = {}): RecordRow[] {
+  const db = getDb();
+  const sql = options.includeInactive
+    ? "SELECT * FROM records ORDER BY created_at ASC, id ASC"
+    : "SELECT * FROM records WHERE status = 'active' ORDER BY created_at ASC, id ASC";
+  return db.prepare(sql).all() as unknown as RecordRow[];
 }
 
 export function searchRecordsFts(

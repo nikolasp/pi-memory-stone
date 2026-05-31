@@ -1,11 +1,20 @@
 /**
- * Commands: /memory-status, /memory-search, /memory-open, /memory-inject, /memory-mode, /memory-last
+ * Commands: /memory-status, /memory-search, /memory-open, /memory-inject, /memory-mode, /memory-last,
+ * /memory-export, /memory-import, /memory-backup
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { getStats, getLastInjection, getRecord } from "../db/index.js";
 import { retrieve } from "../retrieval/index.js";
 import { getProjectId, getConfig } from "../config/index.js";
+import {
+  backupMemoryDatabase,
+  defaultPortablePath,
+  importMemoryJsonFile,
+  resolvePortablePath,
+  writeMemoryExport,
+  type ExportFormat,
+} from "../portable/index.js";
 import {
   INJECTION_MODE_ENTRY,
   MANUAL_INJECTION_ENTRY,
@@ -142,6 +151,50 @@ export function registerCommands(pi: ExtensionAPI): void {
     description: "Alias for /memory-forget",
     handler: async (args, ctx) => {
       await handleMemoryForget(args, ctx);
+    },
+  });
+
+  // ── /memory-export / /memory-import / /memory-backup ───────────
+
+  pi.registerCommand("memory-export", {
+    description: "Export active memory records to JSON or Markdown",
+    handler: async (args, ctx) => {
+      await handleMemoryExport(args, ctx);
+    },
+  });
+
+  pi.registerCommand("stone-export", {
+    description: "Alias for /memory-export",
+    handler: async (args, ctx) => {
+      await handleMemoryExport(args, ctx);
+    },
+  });
+
+  pi.registerCommand("memory-import", {
+    description: "Import memory records from a JSON export",
+    handler: async (args, ctx) => {
+      await handleMemoryImport(args, ctx);
+    },
+  });
+
+  pi.registerCommand("stone-import", {
+    description: "Alias for /memory-import",
+    handler: async (args, ctx) => {
+      await handleMemoryImport(args, ctx);
+    },
+  });
+
+  pi.registerCommand("memory-backup", {
+    description: "Copy the SQLite memory database to a timestamped backup file",
+    handler: async (args, ctx) => {
+      await handleMemoryBackup(args, ctx);
+    },
+  });
+
+  pi.registerCommand("stone-backup", {
+    description: "Alias for /memory-backup",
+    handler: async (args, ctx) => {
+      await handleMemoryBackup(args, ctx);
     },
   });
 
@@ -368,6 +421,66 @@ async function handleMemoryLast(ctx: ExtensionCommandContext): Promise<void> {
   }
 }
 
+async function handleMemoryExport(args: string, ctx: ExtensionCommandContext): Promise<void> {
+  const parsed = parseCommandArgs(args);
+  const formatValue = parsed.options.get("format") ?? (parsed.flags.has("md") ? "md" : "json");
+  if (formatValue !== "json" && formatValue !== "md") {
+    ctx.ui.notify("Usage: /memory-export [path] [--format json|md] [--all]", "warning");
+    return;
+  }
+
+  const format = formatValue as ExportFormat;
+  const outputPath = resolvePortablePath(
+    ctx.cwd,
+    parsed.positionals[0] ?? defaultPortablePath(ctx.cwd, "memory-export", format),
+  );
+
+  try {
+    const count = writeMemoryExport(outputPath, format, parsed.flags.has("all"));
+    ctx.ui.notify(`Exported ${count} memory records to ${outputPath}`, "info");
+  } catch (err) {
+    ctx.ui.notify(`Memory export failed: ${err instanceof Error ? err.message : String(err)}`, "warning");
+  }
+}
+
+async function handleMemoryImport(args: string, ctx: ExtensionCommandContext): Promise<void> {
+  const parsed = parseCommandArgs(args);
+  const inputPathArg = parsed.positionals[0];
+  if (!inputPathArg) {
+    ctx.ui.notify("Usage: /memory-import <memory-export.json> [--preserve-project|--global]", "warning");
+    return;
+  }
+
+  const inputPath = resolvePortablePath(ctx.cwd, inputPathArg);
+  try {
+    const result = importMemoryJsonFile(inputPath, {
+      projectId: parsed.flags.has("preserve-project") ? undefined : getProjectId(ctx.cwd),
+      scopeOverride: parsed.flags.has("global") ? "global" : undefined,
+    });
+    ctx.ui.notify(
+      `Imported ${result.imported} memory records from ${inputPath}${result.skipped ? ` (${result.skipped} skipped)` : ""}`,
+      "info",
+    );
+  } catch (err) {
+    ctx.ui.notify(`Memory import failed: ${err instanceof Error ? err.message : String(err)}`, "warning");
+  }
+}
+
+async function handleMemoryBackup(args: string, ctx: ExtensionCommandContext): Promise<void> {
+  const parsed = parseCommandArgs(args);
+  const outputPath = resolvePortablePath(
+    ctx.cwd,
+    parsed.positionals[0] ?? defaultPortablePath(ctx.cwd, "memory-backup", "db"),
+  );
+
+  try {
+    backupMemoryDatabase(outputPath);
+    ctx.ui.notify(`Backed up memory database to ${outputPath}`, "info");
+  } catch (err) {
+    ctx.ui.notify(`Memory backup failed: ${err instanceof Error ? err.message : String(err)}`, "warning");
+  }
+}
+
 async function handleMemoryForget(args: string, ctx: ExtensionCommandContext): Promise<void> {
   const { softForgetRecord, hardDeleteRecord, getRecord } = await import("../db/index.js");
 
@@ -404,4 +517,40 @@ async function handleMemoryForget(args: string, ctx: ExtensionCommandContext): P
       ctx.ui.notify(`Soft-forgotten record ${refId}`, "info");
     }
   }
+}
+
+function parseCommandArgs(args: string): {
+  flags: Set<string>;
+  options: Map<string, string>;
+  positionals: string[];
+} {
+  const flags = new Set<string>();
+  const options = new Map<string, string>();
+  const positionals: string[] = [];
+  const parts = args?.trim().split(/\s+/).filter(Boolean) ?? [];
+
+  for (let i = 0; i < parts.length; i += 1) {
+    const part = parts[i];
+    if (!part.startsWith("--")) {
+      positionals.push(part);
+      continue;
+    }
+
+    const withoutPrefix = part.slice(2);
+    const eqIndex = withoutPrefix.indexOf("=");
+    if (eqIndex >= 0) {
+      options.set(withoutPrefix.slice(0, eqIndex), withoutPrefix.slice(eqIndex + 1));
+      continue;
+    }
+
+    const next = parts[i + 1];
+    if (next && !next.startsWith("--") && ["format"].includes(withoutPrefix)) {
+      options.set(withoutPrefix, next);
+      i += 1;
+    } else {
+      flags.add(withoutPrefix);
+    }
+  }
+
+  return { flags, options, positionals };
 }

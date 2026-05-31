@@ -48,7 +48,7 @@ pi-memory-stone package source
 │   ├── tools/                    # LLM-callable tools
 │   ├── privacy/                  # Secret redaction, sensitive path filtering
 │   └── config/                   # Project identity, settings
-└── test/                         # 44 tests across 4 suites
+└── test/                         # 51 tests across 6 test files
 ```
 
 ## How It Works
@@ -111,6 +111,11 @@ Before each agent turn, the extension:
 | `/memory-last` | `/stone-last` | Show the last memory injection packet |
 | `/memory-forget <id>` | `/stone-forget` | Soft-forget a record (hide from searches) |
 | `/memory-forget <id> --hard` | | Permanently delete (with confirmation) |
+| `/memory-export [path] --format json\|md` | `/stone-export` | Export active records to a portable JSON or Markdown file (`--all` includes inactive records) |
+| `/memory-import <memory-export.json>` | `/stone-import` | Import records from a JSON export, remapping project-scoped records to the current project by default |
+| `/memory-import <memory-export.json> --preserve-project` | | Import records while preserving exported project IDs |
+| `/memory-import <memory-export.json> --global` | | Import all records as global memories |
+| `/memory-backup [path]` | `/stone-backup` | Copy the SQLite memory database to a timestamped backup file |
 | `/memory-on` | | Enable memory injection for this session |
 | `/memory-off` | | Disable memory injection for this session |
 
@@ -159,6 +164,29 @@ Parameters:
   ref     Memory record reference ID
   hard?   Request permanent deletion (requires confirmation)
 ```
+
+## Portable Export, Import, and Backup
+
+Use JSON export/import when you want a portable, reviewable memory transfer between machines:
+
+```bash
+/memory-export --format json
+/memory-import memory-export.json
+```
+
+Markdown export is for human review outside SQLite:
+
+```bash
+/memory-export memory-export.md --format md
+```
+
+Use a database backup before pruning or hard deletion:
+
+```bash
+/memory-backup
+```
+
+Import defaults are intentionally practical for machine moves: project-scoped records are remapped to the current project. Use `--preserve-project` to keep exported project IDs, or `--global` to import everything as global memory.
 
 ## Privacy & Safety
 
@@ -232,13 +260,14 @@ npm run typecheck
 
 These scripts are also runnable from a pi package clone installed from git; the required script runners are regular dependencies because pi package installs omit `devDependencies`.
 
-48 tests across 5 test files:
+51 tests across 6 test files:
 
 | Suite | Tests | Focus |
 |---|---|---|
 | `indexing.test.ts` | 1 | Incremental session indexing |
-| `privacy.test.ts` | 17 | Secret redaction, sensitive path filtering |
 | `parser.test.ts` | 10 | Turn parsing, file activity detection, error extraction |
+| `portable.test.ts` | 3 | JSON/Markdown export, JSON import, SQLite backup |
+| `privacy.test.ts` | 17 | Secret redaction, sensitive path filtering |
 | `ranking.test.ts` | 16 | Hybrid ranking, cross-project filtering, injection formatting |
 | `session-state.test.ts` | 4 | Injection mode config, session ref selection, manual-only injection |
 
