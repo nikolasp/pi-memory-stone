@@ -13,6 +13,7 @@ import {
   rankAndFilter,
   buildInjectionPacket,
   formatInjectionForLlm,
+  normalizeRetrievalLimit,
 } from "../src/retrieval/index.js";
 import {
   getDb,
@@ -170,6 +171,29 @@ describe("rankAndFilter", () => {
     assert.ok(sameProject.some((r) => r.reasons.includes("same-project")));
   });
 
+  it("filters out project-scoped records with null project IDs", () => {
+    const ranked = rankAndFilter(
+      [
+        {
+          id: "null-project",
+          kind: "decision",
+          scope: "project",
+          project_id: null,
+          status: "active",
+          text: "Null project memory should stay invisible.",
+          rank: 0,
+          created_at: Date.now(),
+          confidence: 1,
+          importance: 0.5,
+        } as RecordRow & { rank: number },
+      ],
+      "/home/test-project",
+      false,
+    );
+
+    assert.equal(ranked.length, 0);
+  });
+
   it("filters out cross-project records when crossProjectEnabled is false", () => {
     const db = getDb();
     const records = db
@@ -317,6 +341,15 @@ describe("rankAndFilter", () => {
 
     const ranked = rankAndFilter(records, "/home/test-project", false);
     assert.equal(ranked.length, 0);
+  });
+});
+
+describe("normalizeRetrievalLimit", () => {
+  it("clamps retrieval limits to a small positive range", () => {
+    assert.equal(normalizeRetrievalLimit(0, 5), 1);
+    assert.equal(normalizeRetrievalLimit(-100, 5), 1);
+    assert.equal(normalizeRetrievalLimit(9999, 5), 20);
+    assert.equal(normalizeRetrievalLimit(Number.NaN, 5), 5);
   });
 });
 

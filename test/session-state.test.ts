@@ -12,6 +12,7 @@ import {
   INJECTION_MODE_ENTRY,
   MANUAL_INJECTION_ENTRY,
   SESSION_TOGGLE_ENTRY,
+  isRecordVisibleInProject,
 } from "../src/session-state/index.js";
 import { getConfig, reloadConfig } from "../src/config/index.js";
 import { closeDb, getDbPath, upsertRecord } from "../src/db/index.js";
@@ -43,6 +44,27 @@ describe("getMemorySessionState", () => {
       injectionMode: "manual",
       manualRefs: ["c"],
     });
+  });
+});
+
+describe("isRecordVisibleInProject", () => {
+  it("does not treat null project IDs as visible project-scoped memories", () => {
+    assert.equal(
+      isRecordVisibleInProject({ scope: "project", project_id: null, status: "active" } as any, "/repo"),
+      false,
+    );
+    assert.equal(
+      isRecordVisibleInProject({ scope: "project", project_id: "/other", status: "active" } as any, "/repo"),
+      false,
+    );
+    assert.equal(
+      isRecordVisibleInProject({ scope: "project", project_id: "/repo", status: "active" } as any, "/repo"),
+      true,
+    );
+    assert.equal(
+      isRecordVisibleInProject({ scope: "global", project_id: null, status: "active" } as any, "/repo"),
+      true,
+    );
   });
 });
 

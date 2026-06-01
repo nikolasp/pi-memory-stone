@@ -6,8 +6,10 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { getRecord, softForgetRecord, upsertRecord } from "../db/index.js";
-import { retrieve, buildInjectionPacket, formatInjectionForLlm } from "../retrieval/index.js";
+import { retrieve, buildInjectionPacket, formatInjectionForLlm, normalizeRetrievalLimit } from "../retrieval/index.js";
 import { getProjectId, getConfig } from "../config/index.js";
+import { isSensitiveForGlobalMemory } from "../privacy/index.js";
+import { isRecordVisibleInProject } from "../session-state/index.js";
 import type { RecordKind, RecordScope } from "../db/schema.js";
 
 export function registerTools(pi: ExtensionAPI): void {
@@ -37,12 +39,12 @@ export function registerTools(pi: ExtensionAPI): void {
         ] as const),
       ),
       scope: Type.Optional(StringEnum(["project", "global"] as const)),
-      limit: Type.Optional(Type.Number({ description: "Max results (default 5)" })),
+      limit: Type.Optional(Type.Number({ description: "Max results (default 5, max 20)", minimum: 1, maximum: 20 })),
     }),
     async execute(toolCallId, params, _signal, _onUpdate, ctx) {
       const projectId = getProjectId(ctx.cwd);
       const config = getConfig(ctx.cwd);
-      const limit = params.limit ?? 5;
+      const limit = normalizeRetrievalLimit(params.limit, 5);
 
       const results = retrieve(params.query, projectId, [], {
         limit,
@@ -102,10 +104,8 @@ export function registerTools(pi: ExtensionAPI): void {
       }
 
       const currentProjectId = getProjectId(ctx.cwd);
-      const visibleInCurrentProject =
-        record.scope === "global" || record.project_id === null || record.project_id === currentProjectId;
 
-      if (record.status !== "active" || !visibleInCurrentProject) {
+      if (record.status !== "active" || !isRecordVisibleInProject(record, currentProjectId)) {
         return {
           content: [{ type: "text", text: `Memory record ${params.ref} is not available.` }],
           details: { ref: params.ref, found: false, unavailable: true },
@@ -168,10 +168,7 @@ export function registerTools(pi: ExtensionAPI): void {
       let scope = params.scope ?? "project";
 
       // Safety: never allow global for implementation details, paths, etc.
-      const isSensitiveForGlobal =
-        /\b(?:password|secret|token|key|\.env|localhost|127\.0\.0\.1|internal|private)\b/i.test(
-          params.text,
-        );
+      const isSensitiveForGlobal = isSensitiveForGlobalMemory(`${params.text}\n${params.tags ?? ""}`);
 
       const downgradedToProject = isSensitiveForGlobal && scope === "global";
       if (downgradedToProject) {
@@ -228,14 +225,22 @@ export function registerTools(pi: ExtensionAPI): void {
         };
       }
 
+      const currentProjectId = getProjectId(ctx.cwd);
+      if (record.status !== "active" || !isRecordVisibleInProject(record, currentProjectId)) {
+        return {
+          content: [{ type: "text", text: `Memory record ${params.ref} is not available.` }],
+          details: { ref: params.ref, found: false, unavailable: true },
+        };
+      }
+
       if (params.hard) {
         // For hard delete via tool, we require the user to explicitly confirm
-        // The tool should note this requires user interaction
+        // The tool should note this requires user interaction without leaking record contents.
         return {
           content: [
             {
               type: "text",
-              text: `Permanent deletion requires explicit confirmation. Please use /memory-forget ${params.ref} --hard to permanently delete this record.\n\nRecord: [${record.kind}] ${record.text.slice(0, 200)}`,
+              text: `Permanent deletion requires explicit confirmation. Please use /memory-forget ${params.ref} --hard to permanently delete this record.`,
             },
           ],
           details: { ref: params.ref, requiresConfirmation: true },

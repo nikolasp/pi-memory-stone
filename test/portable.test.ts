@@ -83,6 +83,68 @@ describe("portable memory helpers", () => {
     assert.equal(records[0].text, "Prefer portable JSON memory exports.");
   });
 
+  it("skips preserved project-scoped imports with null project IDs", () => {
+    const raw = JSON.stringify({
+      format: "pi-memory-stone-export",
+      version: 1,
+      exported_at: new Date().toISOString(),
+      schema_version: 1,
+      records: [
+        {
+          id: "legacy-null-project",
+          kind: "decision",
+          scope: "project",
+          project_id: null,
+          text: "Legacy project memory without project id.",
+          tags: null,
+          status: "active",
+          confidence: 1,
+          importance: 0.5,
+          created_at: Date.now(),
+          updated_at: Date.now(),
+          superseded_by: null,
+          derived_from_memory_refs: null,
+        },
+      ],
+    });
+
+    const result = importMemoryJson(raw, { projectId: undefined });
+    assert.equal(result.imported, 0);
+    assert.equal(result.skipped, 1);
+    assert.equal(listRecords().length, 0);
+  });
+
+  it("skips unsafe records when importing as global", () => {
+    const raw = JSON.stringify({
+      format: "pi-memory-stone-export",
+      version: 1,
+      exported_at: new Date().toISOString(),
+      schema_version: 1,
+      records: [
+        {
+          id: "unsafe-global",
+          kind: "preference",
+          scope: "project",
+          project_id: "/repo",
+          text: "api_key = abcdef0123456789XYZ",
+          tags: null,
+          status: "active",
+          confidence: 1,
+          importance: 0.5,
+          created_at: Date.now(),
+          updated_at: Date.now(),
+          superseded_by: null,
+          derived_from_memory_refs: null,
+        },
+      ],
+    });
+
+    const result = importMemoryJson(raw, { scopeOverride: "global" });
+    assert.equal(result.imported, 0);
+    assert.equal(result.skipped, 1);
+    assert.equal(listRecords().length, 0);
+  });
+
   it("creates a SQLite backup file", () => {
     upsertRecord({
       kind: "decision",

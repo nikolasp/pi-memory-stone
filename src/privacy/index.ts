@@ -27,7 +27,7 @@ const SECRET_PATTERNS: { name: string; regex: RegExp; replacement: SecretReplace
   },
   {
     name: "aws-secret",
-    regex: /(?<=SecretAccessKey[=:]\s*)[A-Za-z0-9/+]{40,}/g,
+    regex: /\b(?:aws[_-]?)?secret[_-]?access[_-]?key\b\s*[=:]\s*['"]?[A-Za-z0-9/+=]{40,}['"]?/gi,
     replacement: "[REDACTED:aws-secret]",
   },
   {
@@ -37,12 +37,12 @@ const SECRET_PATTERNS: { name: string; regex: RegExp; replacement: SecretReplace
   },
   {
     name: "generic-api-key",
-    regex: /(?:api[_-]?key|apikey|api[_-]?secret|secret[_-]?key)[=:]\s*['"]?[A-Za-z0-9_\-.]{16,}['"]?/gi,
+    regex: /\b(?:api[_-]?key|apikey|api[_-]?secret|secret[_-]?key|client[_-]?secret|private[_-]?key|access[_-]?key|auth[_-]?key)\b\s*[=:]\s*['"]?[A-Za-z0-9_\-./+=]{16,}['"]?/gi,
     replacement: "[REDACTED:api-key]",
   },
   {
     name: "secret-assignment",
-    regex: /\b(?:secret|secret[_-]?key)\b\s*[=:]\s*(?:['"][^'"]+['"]|[^\s'"`]+)/gi,
+    regex: /\b(?:secret|secret[_-]?key|client[_-]?secret|app[_-]?secret|webhook[_-]?secret|signing[_-]?secret)\b\s*[=:]\s*(?:['"][^'"]+['"]|[^\s'"`]+)/gi,
     replacement: "[REDACTED:secret]",
   },
   {
@@ -124,6 +124,22 @@ export function redactSecrets(text: string): string {
     result = replaceSecretPattern(result, pattern);
   }
   return result;
+}
+
+export function isSensitiveForGlobalMemory(text: string): boolean {
+  if (redactSecrets(text) !== text) return true;
+
+  return [
+    // Local/absolute/relative filesystem paths and common repo paths.
+    /(?:^|\s)(?:~|\.|\.\.|[A-Za-z]:)?[/\\][^\s]+/,
+    /\b(?:src|lib|test|tests|packages|apps|docs|config)\/[\w./-]+\b/i,
+    /\b[\w.-]+\.(?:ts|tsx|js|jsx|mjs|cjs|json|yaml|yml|toml|env|db|sqlite|pem|key|crt)\b/i,
+    // Hostnames and network endpoints.
+    /\b(?:localhost|127\.0\.0\.1|0\.0\.0\.0|::1)\b/i,
+    /\b[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+(?::\d{2,5})?\b/i,
+    // Implementation/internal detail markers that should stay project-local.
+    /\b(?:internal|private|implementation detail|class|function|method|module|endpoint|schema|table|column)\b/i,
+  ].some((pattern) => pattern.test(text));
 }
 
 export function isSensitivePath(path: string, extraPatterns: RegExp[] = []): boolean {

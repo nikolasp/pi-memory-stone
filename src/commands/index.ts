@@ -500,6 +500,12 @@ async function handleMemoryForget(args: string, ctx: ExtensionCommandContext): P
       continue;
     }
 
+    const currentProjectId = getProjectId(ctx.cwd);
+    if (record.status !== "active" || !isRecordVisibleInProject(record, currentProjectId)) {
+      ctx.ui.notify(`Memory record ${refId} is not available.`, "warning");
+      continue;
+    }
+
     if (hardFlag) {
       const confirmed = ctx.hasUI
         ? await ctx.ui.confirm(

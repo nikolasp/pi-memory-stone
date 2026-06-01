@@ -67,7 +67,8 @@ export function parseRefArgs(args: string): string[] {
 }
 
 export function isRecordVisibleInProject(record: RecordRow, currentProjectId: string | null): boolean {
-  return record.scope === "global" || record.project_id === null || record.project_id === currentProjectId;
+  if (record.scope === "global") return true;
+  return Boolean(currentProjectId && record.project_id && record.project_id === currentProjectId);
 }
 
 export function manualRecordsToRankedResults(

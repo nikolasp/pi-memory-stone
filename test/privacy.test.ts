@@ -5,7 +5,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { redactSecrets, isSensitivePath, shouldIgnoreFile } from "../src/privacy/index.js";
+import { redactSecrets, isSensitiveForGlobalMemory, isSensitivePath, shouldIgnoreFile } from "../src/privacy/index.js";
 
 describe("redactSecrets", () => {
   it("redacts OpenAI API keys", () => {
@@ -46,6 +46,20 @@ describe("redactSecrets", () => {
     assert.ok(!result.includes("shhDontKeepMe"));
   });
 
+  it("redacts common API key assignments with whitespace", () => {
+    const input = "api_key = abcdef0123456789XYZ client_secret: abcdef0123456789XYZ";
+    const result = redactSecrets(input);
+    assert.ok(result.includes("[REDACTED:api-key]"));
+    assert.ok(!result.includes("abcdef0123456789XYZ"));
+  });
+
+  it("redacts AWS secret access key environment variables", () => {
+    const input = "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+    const result = redactSecrets(input);
+    assert.ok(result.includes("[REDACTED:aws-secret]"));
+    assert.ok(!result.includes("wJalrXUtnFEMI"));
+  });
+
   it("redacts connection strings", () => {
     const input = "DATABASE_URL=mongodb://user:pass@localhost:27017/db";
     const result = redactSecrets(input);
@@ -66,6 +80,19 @@ MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC...
     const input = "Just some normal conversation about code";
     const result = redactSecrets(input);
     assert.equal(result, input);
+  });
+});
+
+describe("isSensitiveForGlobalMemory", () => {
+  it("flags paths, hostnames, secrets, and implementation details", () => {
+    assert.ok(isSensitiveForGlobalMemory("Remember /Users/me/project/src/index.ts"));
+    assert.ok(isSensitiveForGlobalMemory("API lives at api.internal.example.com"));
+    assert.ok(isSensitiveForGlobalMemory("api_key = abcdef0123456789XYZ"));
+    assert.ok(isSensitiveForGlobalMemory("Implementation detail: call AuthService.refreshToken"));
+  });
+
+  it("allows portable user preferences", () => {
+    assert.equal(isSensitiveForGlobalMemory("User prefers concise bullet points."), false);
   });
 });
 

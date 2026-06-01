@@ -23,6 +23,8 @@ const KIND_BOOST: Record<string, number> = {
 // ─── Recency decay ──────────────────────────────────────────────────
 
 const RECENCY_HALF_LIFE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+export const MAX_RETRIEVAL_LIMIT = 20;
+const MAX_CANDIDATE_LIMIT = MAX_RETRIEVAL_LIMIT * 10;
 
 function recencyDecay(createdAt: number): number {
   const age = Date.now() - createdAt;
@@ -72,7 +74,7 @@ export function rankAndFilter(
     // and require explicit cross-project retrieval.
     if (rec.scope === "global") {
       if (!crossProjectEnabled) continue;
-    } else if (rec.project_id && currentProjectId && rec.project_id !== currentProjectId) {
+    } else if (!rec.project_id || !currentProjectId || rec.project_id !== currentProjectId) {
       continue;
     }
 
@@ -121,6 +123,11 @@ export function rankAndFilter(
 
 // ─── Full retrieval pipeline ────────────────────────────────────────
 
+export function normalizeRetrievalLimit(value: unknown, fallback: number): number {
+  const numeric = typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : fallback;
+  return Math.max(1, Math.min(MAX_RETRIEVAL_LIMIT, numeric));
+}
+
 export function retrieve(
   userPrompt: string,
   currentProjectId: string | null,
@@ -133,13 +140,14 @@ export function retrieve(
   },
 ): RankedResult[] {
   const config = getConfig();
-  const limit = opts?.limit ?? config.maxInjectedRecords;
+  const limit = normalizeRetrievalLimit(opts?.limit, config.maxInjectedRecords);
   const crossProject = opts?.crossProjectEnabled ?? config.crossProjectEnabled;
 
   const query = buildSearchQuery(userPrompt, recentFiles);
 
-  // Get more candidates than needed (ranking will filter)
-  const candidates = searchRecordsFts(query, limit * 10, opts?.kindFilter, opts?.scopeFilter);
+  // Get more candidates than needed (ranking will filter), but keep local work bounded.
+  const candidateLimit = Math.min(MAX_CANDIDATE_LIMIT, limit * 10);
+  const candidates = searchRecordsFts(query, candidateLimit, opts?.kindFilter, opts?.scopeFilter);
 
   const ranked = rankAndFilter(candidates, currentProjectId, crossProject);
 

@@ -2,10 +2,11 @@
  * Portable export/import/backup helpers for memory records.
  */
 
-import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
-import { getDb, getDbPath, listRecords, upsertRecord, type RecordRow } from "../db/index.js";
+import { getDb, getDbPath, hardenDbFilePermissions, listRecords, upsertRecord, type RecordRow } from "../db/index.js";
 import { SCHEMA_VERSION, RECORD_KINDS, RECORD_SCOPES, RECORD_STATUSES, type RecordKind, type RecordScope, type RecordStatus } from "../db/schema.js";
+import { isSensitiveForGlobalMemory } from "../privacy/index.js";
 
 export type ExportFormat = "json" | "md";
 
@@ -68,8 +69,8 @@ export function exportMemory(format: ExportFormat, includeInactive = false): str
 export function writeMemoryExport(path: string, format: ExportFormat, includeInactive = false): number {
   const payload = buildMemoryExport(includeInactive);
   const content = format === "json" ? JSON.stringify(payload, null, 2) + "\n" : exportMarkdown(payload);
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, content, "utf8");
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  writeFileSync(path, content, { encoding: "utf8", mode: 0o600 });
   return payload.records.length;
 }
 
@@ -94,6 +95,14 @@ export function importMemoryJson(raw: string, options: ImportOptions = {}): Impo
 
     const scope = options.scopeOverride ?? record.scope;
     const projectId = scope === "global" ? null : (options.projectId !== undefined ? options.projectId : record.project_id);
+    if (scope === "project" && !projectId) {
+      result.skipped += 1;
+      continue;
+    }
+    if (scope === "global" && isSensitiveForGlobalMemory(`${record.text}\n${record.tags ?? ""}`)) {
+      result.skipped += 1;
+      continue;
+    }
     const id = upsertRecord({
       kind: record.kind,
       scope,
@@ -117,9 +126,13 @@ export function importMemoryJson(raw: string, options: ImportOptions = {}): Impo
 }
 
 export function backupMemoryDatabase(path: string): void {
-  mkdirSync(dirname(path), { recursive: true });
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   getDb().exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  hardenDbFilePermissions();
   copyFileSync(getDbPath(), path);
+  try {
+    chmodSync(path, 0o600);
+  } catch {}
 }
 
 export function defaultPortablePath(cwd: string, prefix: string, extension: string): string {

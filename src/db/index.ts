@@ -4,7 +4,7 @@
  */
 
 import { DatabaseSync } from "node:sqlite";
-import { existsSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { redactSecrets } from "../privacy/index.js";
@@ -41,15 +41,36 @@ export function getDb(): DatabaseSync {
   if (!_db) {
     const dbDir = getDbDir();
     if (!existsSync(dbDir)) {
-      mkdirSync(dbDir, { recursive: true });
+      mkdirSync(dbDir, { recursive: true, mode: 0o700 });
     }
+    hardenPathPermissions(dbDir, 0o700);
     _db = new DatabaseSync(getDbPath());
+    hardenDbFilePermissions();
     _db.exec("PRAGMA journal_mode = WAL");
     _db.exec("PRAGMA busy_timeout = 5000");
     _db.exec("PRAGMA foreign_keys = ON");
     runMigrations(_db);
+    hardenDbFilePermissions();
   }
   return _db;
+}
+
+function hardenPathPermissions(path: string, mode: number): void {
+  try {
+    chmodSync(path, mode);
+  } catch {
+    // Best-effort only: do not make memory unavailable on filesystems that
+    // do not support POSIX permissions.
+  }
+}
+
+export function hardenDbFilePermissions(): void {
+  const dbPath = getDbPath();
+  for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+    if (existsSync(path)) {
+      hardenPathPermissions(path, 0o600);
+    }
+  }
 }
 
 export function closeDb(): void {
@@ -253,6 +274,9 @@ export function upsertRecord(record: {
   const updatedAt = record.updated_at ?? now;
   const scope = record.scope ?? "project";
   const projectId = scope === "global" ? null : (record.project_id ?? null);
+  if (scope === "project" && !projectId) {
+    throw new Error("Project-scoped memory records require a project_id");
+  }
   const redactedText = redactSecrets(record.text);
   const redactedTags = record.tags ? redactSecrets(record.tags) : null;
   const id = recordIdentityHash(redactedText, record.kind, scope, projectId);
@@ -363,6 +387,8 @@ export function searchRecordsFts(
 
   if (!terms) return [];
 
+  const safeLimit = Math.max(1, Math.min(200, Number.isFinite(limit) ? Math.floor(limit) : 20));
+
   const results = db
     .prepare(
       `SELECT r.*, fts.rank as rank
@@ -372,7 +398,7 @@ export function searchRecordsFts(
        ORDER BY rank
        LIMIT ?`
     )
-    .all(terms, limit) as unknown as (RecordRow & { rank: number })[];
+    .all(terms, safeLimit) as unknown as (RecordRow & { rank: number })[];
 
   // Apply post-filters
   return results.filter((r) => {

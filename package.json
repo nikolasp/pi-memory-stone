@@ -1,17 +1,19 @@
 {
   "name": "pi-memory-stone",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "type": "module",
   "description": "Global pi extension: preserves and retrieves useful memory across pi sessions",
   "license": "MIT",
   "keywords": ["pi-package"],
   "files": [
     "src",
+    "skills/**/*",
     "README.md",
     "LICENSE"
   ],
   "pi": {
-    "extensions": ["./src/index.ts"]
+    "extensions": ["./src/index.ts"],
+    "skills": ["./skills"]
   },
   "scripts": {
     "test": "NODE_OPTIONS='--experimental-sqlite' tsx --test test/*.test.ts",
