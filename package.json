@@ -4,7 +4,9 @@
   "type": "module",
   "description": "Global pi extension: preserves and retrieves useful memory across pi sessions",
   "license": "MIT",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "files": [
     "src",
     "skills/**/*",
@@ -12,15 +14,24 @@
     "LICENSE"
   ],
   "pi": {
-    "extensions": ["./src/index.ts"],
-    "skills": ["./skills"]
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
   },
   "scripts": {
     "test": "NODE_OPTIONS='--experimental-sqlite' tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@mozilla/readability": "^0.6.0",
+    "@types/jsdom": "^28.0.3",
+    "@types/turndown": "^5.0.6",
+    "jsdom": "^29.1.1",
     "tsx": "^4.22.3",
+    "turndown": "^7.2.4",
     "typescript": "^5.9.3"
   },
   "peerDependencies": {

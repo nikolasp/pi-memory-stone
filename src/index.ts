@@ -9,6 +9,7 @@
  *  - Deterministic turn_summary and file_activity capture on agent_end
  *  - FTS5 search
  *  - /memory-status, /memory-search, /memory-open, /memory-inject, /memory-last commands
+ *  - /memory-vault-* commands and natural-language URL capture
  *  - memory_search, memory_open, memory_remember, memory_forget tools
  *  - Conservative same-project before_agent_start injection
  */
@@ -21,6 +22,8 @@ import { retrieve, buildInjectionPacket, formatInjectionForLlm } from "./retriev
 import { getProjectId, getConfig, clearProjectCache } from "./config/index.js";
 import { closeDb, getRecord, insertInjection } from "./db/index.js";
 import { getMemorySessionState, manualRecordsToRankedResults } from "./session-state/index.js";
+import { captureUrlToVault } from "./vault/capture.js";
+import { parseVaultCaptureIntent } from "./vault/intent.js";
 import { createHash } from "node:crypto";
 
 // ─── Session-scoped state ───────────────────────────────────────────
@@ -30,6 +33,37 @@ const injectedRefsThisSession: Set<string> = new Set();
 
 /** Whether memory injection is temporarily disabled for this session */
 let sessionEnabled = true;
+
+async function maybeCaptureVaultUrl(
+  prompt: string,
+  projectId: string | null,
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  const intent = parseVaultCaptureIntent(prompt);
+  if (!intent) return null;
+
+  try {
+    const result = await captureUrlToVault(intent.scope, projectId, cwd, intent.url, { signal });
+    const warnings = result.warnings.length > 0 ? `\nWarnings: ${result.warnings.join("; ")}` : "";
+    return `Captured web page into ${intent.scope} memory vault${result.initialized ? " (initialized vault)" : ""}: ${result.title}\nQuality: ${result.quality} (${result.qualityScore})${warnings}\nPage: ${result.pagePath}\nSource packet: ${result.sourcePacketPath}`;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("[pi-memory-stone] vault URL capture failed:", err);
+    return `Memory vault URL capture failed: ${message}`;
+  }
+}
+
+function vaultCaptureReturn(systemPrompt: string, notice: string) {
+  return {
+    message: {
+      customType: "memory-vault-capture",
+      content: notice,
+      display: true,
+    },
+    systemPrompt: `${systemPrompt}\n\n--- Memory Vault Capture ---\n${notice}\nThe user's vault capture request has already been handled by pi-memory-stone. Briefly confirm the result; do not fetch the same URL again unless the user asks.\n--- End Memory Vault Capture ---`,
+  };
+}
 
 // ─── Extension entry point ─────────────────────────────────────────
 
@@ -69,18 +103,24 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("before_agent_start", async (event, ctx) => {
     try {
+      const prompt = event.prompt || "";
+      const projectId = getProjectId(ctx.cwd);
+      const vaultCaptureNotice = await maybeCaptureVaultUrl(prompt, projectId, ctx.cwd, ctx.signal);
+
       // Check if memory is enabled
       const config = getConfig(ctx.cwd);
-      if (!config.enabled) return;
+      if (!config.enabled) {
+        return vaultCaptureNotice ? vaultCaptureReturn(event.systemPrompt || "", vaultCaptureNotice) : undefined;
+      }
 
       const sessionState = getMemorySessionState(ctx.sessionManager.getBranch());
       sessionEnabled = sessionState.enabled;
 
-      if (!sessionEnabled) return;
+      if (!sessionEnabled) {
+        return vaultCaptureNotice ? vaultCaptureReturn(event.systemPrompt || "", vaultCaptureNotice) : undefined;
+      }
 
-      const prompt = event.prompt || "";
       const promptHash = createHash("sha256").update(prompt).digest("hex").slice(0, 12);
-      const projectId = getProjectId(ctx.cwd);
       const injectionMode = sessionState.injectionMode ?? config.injectionMode;
 
       const manualRecords = sessionState.manualRefs
@@ -103,10 +143,11 @@ export default function (pi: ExtensionAPI) {
       }
 
       const selectedResults = [...manualResults, ...autoResults];
-      if (selectedResults.length === 0) return;
-
-      const packet = buildInjectionPacket(selectedResults);
-      const formatted = formatInjectionForLlm(packet, config.maxInjectedTokens);
+      let formatted: string | null = null;
+      if (selectedResults.length > 0) {
+        const packet = buildInjectionPacket(selectedResults);
+        formatted = formatInjectionForLlm(packet, config.maxInjectedTokens);
+      }
 
       // Track only search-selected refs. Manually chosen refs are intentionally
       // injected on every turn until /memory-clear-injected is used.
@@ -114,27 +155,36 @@ export default function (pi: ExtensionAPI) {
         injectedRefsThisSession.add(r.record.id);
       }
 
-      insertInjection({
-        session_id: ctx.sessionManager.getSessionId(),
-        turn_entry_id: ctx.sessionManager.getLeafId() ?? undefined,
-        prompt_hash: promptHash,
-        injected_refs: selectedResults.map((r) => r.record.id).join(","),
-        packet: formatted,
-        reasons: selectedResults.map((r) => r.reasons.join(";")).join(" | "),
-      });
+      if (formatted) {
+        insertInjection({
+          session_id: ctx.sessionManager.getSessionId(),
+          turn_entry_id: ctx.sessionManager.getLeafId() ?? undefined,
+          prompt_hash: promptHash,
+          injected_refs: selectedResults.map((r) => r.record.id).join(","),
+          packet: formatted,
+          reasons: selectedResults.map((r) => r.reasons.join(";")).join(" | "),
+        });
+      }
 
-      // Inject as a non-context audit custom entry (separate from LLM context)
-      // but also as a system prompt addition for the LLM
-      const systemPromptAddition = [
-        "",
-        "--- Memory Stone Context ---",
-        formatted,
-        "--- End Memory Stone Context ---",
-      ].join("\n");
+      if (!formatted && !vaultCaptureNotice) return;
 
-      return {
-        systemPrompt: (event.systemPrompt || "") + systemPromptAddition,
-      };
+      let systemPrompt = event.systemPrompt || "";
+      if (formatted) {
+        // Inject as a non-context audit custom entry (separate from LLM context)
+        // but also as a system prompt addition for the LLM
+        systemPrompt += [
+          "",
+          "--- Memory Stone Context ---",
+          formatted,
+          "--- End Memory Stone Context ---",
+        ].join("\n");
+      }
+
+      if (vaultCaptureNotice) {
+        return vaultCaptureReturn(systemPrompt, vaultCaptureNotice);
+      }
+
+      return { systemPrompt };
     } catch (err) {
       console.error("[pi-memory-stone] before_agent_start handler error:", err);
     }

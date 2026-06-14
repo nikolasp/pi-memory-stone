@@ -20,6 +20,15 @@ export function resolveVaultPath(scope: VaultScope, projectId: string | null, cw
   return join(root, ".memory-stone", "vault");
 }
 
+export function resolveSourcePacketPath(scope: VaultScope, projectId: string | null, cwd: string, captureId: string): string {
+  if (scope === "personal") {
+    return join(getMemoryDir(), "source-packets", "personal", captureId);
+  }
+
+  const root = projectId ?? cwd;
+  return join(root, ".memory-stone", "source-packets", captureId);
+}
+
 export function isVaultScope(value: string): value is VaultScope {
   return value === "project" || value === "personal";
 }

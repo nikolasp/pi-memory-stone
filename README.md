@@ -120,6 +120,7 @@ Before each agent turn, the extension:
 | `/memory-vault-init [--project\|--personal]` | `/stone-vault-init` | Initialize an Obsidian-compatible markdown vault |
 | `/memory-vault-sync [--project\|--personal]` | `/stone-vault-sync` | Generate vault pages from active memory records |
 | `/memory-vault-status [--project\|--personal]` | `/stone-vault-status` | Show vault path, page counts, registry, and last sync |
+| `/memory-vault-capture-url <url> [--project\|--personal]` | `/stone-vault-capture-url` | Capture a web page into the vault as a source page |
 | `/memory-on` | | Enable memory injection for this session |
 | `/memory-off` | | Disable memory injection for this session |
 
@@ -197,10 +198,22 @@ Import defaults are intentionally practical for machine moves: project-scoped re
 Memory vaults are optional Obsidian-compatible markdown projections of active memory records. SQLite remains the source of truth; generated pages may be overwritten by `/memory-vault-sync`.
 
 ```bash
-# Project-local vault, written only after explicit init
+# Project-local vault, written only after explicit init or capture request
 /memory-vault-init --project
 /memory-vault-sync --project
 /memory-vault-status --project
+
+# Capture a web page source into the vault
+/memory-vault-capture-url https://example.com/article --project
+
+# Capture resolves known source formats before generic HTML extraction.
+# Examples: GitHub Gist pages are fetched from gist.githubusercontent.com/raw,
+# GitHub blob URLs are fetched from raw.githubusercontent.com, and raw Markdown
+# is preserved as Markdown.
+
+# Natural-language capture also works from normal prompts:
+# "Capture this article into vault https://example.com/article"
+# "Add page to personal vault https://example.com/article"
 
 # Private personal vault for global memories
 /memory-vault-init --personal
@@ -220,8 +233,11 @@ Initial layout:
 index.md
 WIKI_SCHEMA.md
 records/{decisions,preferences,tasks,error-resolutions,turn-summaries,session-summaries}/
+sources/                       # captured web source pages
 meta/registry.json
 ```
+
+URL capture writes curated source notes into `sources/`. Raw provenance packets (manifest, metadata, fetch attempts, original artifact, extracted markdown) are stored outside the Obsidian vault under `.memory-stone/source-packets/` for project vaults or `~/.pi/agent/memory/source-packets/personal/` for personal vaults. Capture extracts HTML articles with Mozilla Readability, converts to Markdown, redacts secrets, and marks extraction quality as `good` or `weak` with warnings.
 
 ## Privacy & Safety
 
@@ -295,7 +311,7 @@ npm run typecheck
 
 These scripts are also runnable from a pi package clone installed from git; the required script runners are regular dependencies because pi package installs omit `devDependencies`.
 
-67 tests across 8 test files:
+69 tests across 8 test files:
 
 | Suite | Tests | Focus |
 |---|---|---|
@@ -306,7 +322,7 @@ These scripts are also runnable from a pi package clone installed from git; the 
 | `ranking.test.ts` | 18 | Hybrid ranking, cross-project filtering, injection formatting |
 | `session-state.test.ts` | 5 | Injection mode config, session ref selection, manual-only injection |
 | `tools.test.ts` | 2 | Tool visibility and forgetting safety |
-| `vault.test.ts` | 5 | Vault path resolution, initialization, sync, registry generation |
+| `vault.test.ts` | 7 | Vault path resolution, initialization, sync, URL capture, registry generation |
 
 ## Configuration
 

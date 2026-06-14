@@ -31,6 +31,8 @@ import {
   syncVault,
   type VaultScope,
 } from "../vault/index.js";
+import { captureUrlToVault } from "../vault/capture.js";
+import { extractFirstUrl } from "../vault/intent.js";
 
 export function registerCommands(pi: ExtensionAPI): void {
   // ── /memory-status ──────────────────────────────────────────────
@@ -242,10 +244,24 @@ export function registerCommands(pi: ExtensionAPI): void {
     },
   });
 
+  pi.registerCommand("memory-vault-capture-url", {
+    description: "Capture a web page URL into the memory vault",
+    handler: async (args, ctx) => {
+      await handleMemoryVaultCaptureUrl(args, ctx);
+    },
+  });
+
   pi.registerCommand("stone-vault-status", {
     description: "Alias for /memory-vault-status",
     handler: async (args, ctx) => {
       await handleMemoryVaultStatus(args, ctx);
+    },
+  });
+
+  pi.registerCommand("stone-vault-capture-url", {
+    description: "Alias for /memory-vault-capture-url",
+    handler: async (args, ctx) => {
+      await handleMemoryVaultCaptureUrl(args, ctx);
     },
   });
 
@@ -586,6 +602,30 @@ async function handleMemoryVaultStatus(args: string, ctx: ExtensionCommandContex
   lines.push(`  synced record pages: ${status.recordPageCount}`);
   lines.push(`  last sync: ${status.lastSyncedAt ?? "never"}`);
   ctx.ui.notify(lines.join("\n"), "info");
+}
+
+async function handleMemoryVaultCaptureUrl(args: string, ctx: ExtensionCommandContext): Promise<void> {
+  const parsed = parseCommandArgs(args);
+  const scope = parseVaultScopeOrNotify(parsed, ctx);
+  if (!scope) return;
+
+  const url = extractFirstUrl(args);
+  if (!url) {
+    ctx.ui.notify("Usage: /memory-vault-capture-url <http-url> [--project|--personal]", "warning");
+    return;
+  }
+
+  try {
+    const projectId = getProjectId(ctx.cwd);
+    const result = await captureUrlToVault(scope, projectId, ctx.cwd, url);
+    const warnings = result.warnings.length > 0 ? `\nWarnings: ${result.warnings.join("; ")}` : "";
+    ctx.ui.notify(
+      `Captured ${result.title} into ${scope} memory vault${result.initialized ? " (initialized vault)" : ""}\nQuality: ${result.quality} (${result.qualityScore})${warnings}\nPage: ${result.pagePath}`,
+      "info",
+    );
+  } catch (err) {
+    ctx.ui.notify(`Memory vault URL capture failed: ${err instanceof Error ? err.message : String(err)}`, "warning");
+  }
 }
 
 function parseVaultScopeOrNotify(

@@ -51,7 +51,9 @@ export interface VaultRegistryPage {
   path: string;
   title: string;
   kind: string;
-  source_record_id: string;
+  source_record_id?: string;
+  source_url?: string;
+  source_packet?: string;
   content_hash: string;
   generated: true;
   created_at: string;
@@ -106,13 +108,15 @@ export function syncVault(scope: VaultScope, projectId: string | null, cwd: stri
     });
   }
 
+  const existingRegistry = readRegistry(join(vaultPath, "meta", "registry.json"));
+  const preservedPages = existingRegistry?.pages.filter((page) => !page.source_record_id) ?? [];
   const registry: VaultRegistry = {
     format: "pi-memory-stone-vault-registry",
     version: VAULT_SCHEMA_VERSION,
     scope,
     project_id: scope === "project" ? projectId : null,
     generated_at: new Date().toISOString(),
-    pages,
+    pages: [...preservedPages, ...pages].sort((a, b) => a.path.localeCompare(b.path)),
   };
 
   const registryPath = join(vaultPath, "meta", "registry.json");
@@ -133,7 +137,7 @@ export function getVaultStatus(scope: VaultScope, projectId: string | null, cwd:
     initialized,
     registryExists: existsSync(registryPath),
     pageCount: countMarkdownFiles(vaultPath),
-    recordPageCount: registry?.pages.length ?? 0,
+    recordPageCount: registry?.pages.filter((page) => Boolean(page.source_record_id)).length ?? 0,
     lastSyncedAt: registry?.generated_at ?? null,
   };
 }
