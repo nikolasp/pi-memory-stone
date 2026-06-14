@@ -46,9 +46,10 @@ pi-memory-stone package source
 │   ├── retrieval/                # FTS search, hybrid ranking, injection builder
 │   ├── commands/                 # /memory-* slash commands
 │   ├── tools/                    # LLM-callable tools
+│   ├── vault/                    # Optional Obsidian-compatible markdown vaults
 │   ├── privacy/                  # Secret redaction, sensitive path filtering
 │   └── config/                   # Project identity, settings
-└── test/                         # 51 tests across 6 test files
+└── test/                         # tests across memory, privacy, portable, and vault helpers
 ```
 
 ## How It Works
@@ -116,6 +117,9 @@ Before each agent turn, the extension:
 | `/memory-import <memory-export.json> --preserve-project` | | Import records while preserving exported project IDs |
 | `/memory-import <memory-export.json> --global` | | Import all records as global memories |
 | `/memory-backup [path]` | `/stone-backup` | Copy the SQLite memory database to a timestamped backup file |
+| `/memory-vault-init [--project\|--personal]` | `/stone-vault-init` | Initialize an Obsidian-compatible markdown vault |
+| `/memory-vault-sync [--project\|--personal]` | `/stone-vault-sync` | Generate vault pages from active memory records |
+| `/memory-vault-status [--project\|--personal]` | `/stone-vault-status` | Show vault path, page counts, registry, and last sync |
 | `/memory-on` | | Enable memory injection for this session |
 | `/memory-off` | | Disable memory injection for this session |
 
@@ -187,6 +191,37 @@ Use a database backup before pruning or hard deletion:
 ```
 
 Import defaults are intentionally practical for machine moves: project-scoped records are remapped to the current project. Use `--preserve-project` to keep exported project IDs, or `--global` to import everything as global memory.
+
+## Knowledge Vaults
+
+Memory vaults are optional Obsidian-compatible markdown projections of active memory records. SQLite remains the source of truth; generated pages may be overwritten by `/memory-vault-sync`.
+
+```bash
+# Project-local vault, written only after explicit init
+/memory-vault-init --project
+/memory-vault-sync --project
+/memory-vault-status --project
+
+# Private personal vault for global memories
+/memory-vault-init --personal
+/memory-vault-sync --personal
+```
+
+Default locations:
+
+```txt
+<repo>/.memory-stone/vault/              # project vault
+~/.pi/agent/memory/vaults/personal/      # personal vault
+```
+
+Initial layout:
+
+```txt
+index.md
+WIKI_SCHEMA.md
+records/{decisions,preferences,tasks,error-resolutions,turn-summaries,session-summaries}/
+meta/registry.json
+```
 
 ## Privacy & Safety
 
@@ -260,16 +295,18 @@ npm run typecheck
 
 These scripts are also runnable from a pi package clone installed from git; the required script runners are regular dependencies because pi package installs omit `devDependencies`.
 
-51 tests across 6 test files:
+67 tests across 8 test files:
 
 | Suite | Tests | Focus |
 |---|---|---|
 | `indexing.test.ts` | 1 | Incremental session indexing |
 | `parser.test.ts` | 10 | Turn parsing, file activity detection, error extraction |
-| `portable.test.ts` | 3 | JSON/Markdown export, JSON import, SQLite backup |
-| `privacy.test.ts` | 17 | Secret redaction, sensitive path filtering |
-| `ranking.test.ts` | 16 | Hybrid ranking, cross-project filtering, injection formatting |
-| `session-state.test.ts` | 4 | Injection mode config, session ref selection, manual-only injection |
+| `portable.test.ts` | 5 | JSON/Markdown export, JSON import, SQLite backup |
+| `privacy.test.ts` | 21 | Secret redaction, sensitive path filtering |
+| `ranking.test.ts` | 18 | Hybrid ranking, cross-project filtering, injection formatting |
+| `session-state.test.ts` | 5 | Injection mode config, session ref selection, manual-only injection |
+| `tools.test.ts` | 2 | Tool visibility and forgetting safety |
+| `vault.test.ts` | 5 | Vault path resolution, initialization, sync, registry generation |
 
 ## Configuration
 
@@ -302,6 +339,7 @@ For manual-only memory, keep `enabled: true` and set `injectionMode: "manual"`.
 - LLM extraction (decisions, preferences, tasks)
 - Historical backfill (`/memory-backfill`)
 - Embedding-based semantic search
+- Vault backlinks/lint/search/capture commands
 - `/memory-edit`, `/memory-supersede`
 - Rich TUI memory browser
 - Multi-machine sync

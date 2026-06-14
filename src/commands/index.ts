@@ -1,6 +1,6 @@
 /**
  * Commands: /memory-status, /memory-search, /memory-open, /memory-inject, /memory-mode, /memory-last,
- * /memory-export, /memory-import, /memory-backup
+ * /memory-export, /memory-import, /memory-backup, /memory-vault-*
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
@@ -24,6 +24,13 @@ import {
   isRecordVisibleInProject,
   parseRefArgs,
 } from "../session-state/index.js";
+import {
+  getVaultStatus,
+  initVault,
+  parseVaultScope,
+  syncVault,
+  type VaultScope,
+} from "../vault/index.js";
 
 export function registerCommands(pi: ExtensionAPI): void {
   // ── /memory-status ──────────────────────────────────────────────
@@ -195,6 +202,50 @@ export function registerCommands(pi: ExtensionAPI): void {
     description: "Alias for /memory-backup",
     handler: async (args, ctx) => {
       await handleMemoryBackup(args, ctx);
+    },
+  });
+
+  // ── /memory-vault-* ─────────────────────────────────────────────
+
+  pi.registerCommand("memory-vault-init", {
+    description: "Initialize an Obsidian-compatible memory vault",
+    handler: async (args, ctx) => {
+      await handleMemoryVaultInit(args, ctx);
+    },
+  });
+
+  pi.registerCommand("stone-vault-init", {
+    description: "Alias for /memory-vault-init",
+    handler: async (args, ctx) => {
+      await handleMemoryVaultInit(args, ctx);
+    },
+  });
+
+  pi.registerCommand("memory-vault-sync", {
+    description: "Sync active memory records into the initialized markdown vault",
+    handler: async (args, ctx) => {
+      await handleMemoryVaultSync(args, ctx);
+    },
+  });
+
+  pi.registerCommand("stone-vault-sync", {
+    description: "Alias for /memory-vault-sync",
+    handler: async (args, ctx) => {
+      await handleMemoryVaultSync(args, ctx);
+    },
+  });
+
+  pi.registerCommand("memory-vault-status", {
+    description: "Show memory vault path, initialization, and sync status",
+    handler: async (args, ctx) => {
+      await handleMemoryVaultStatus(args, ctx);
+    },
+  });
+
+  pi.registerCommand("stone-vault-status", {
+    description: "Alias for /memory-vault-status",
+    handler: async (args, ctx) => {
+      await handleMemoryVaultStatus(args, ctx);
     },
   });
 
@@ -481,6 +532,74 @@ async function handleMemoryBackup(args: string, ctx: ExtensionCommandContext): P
   }
 }
 
+async function handleMemoryVaultInit(args: string, ctx: ExtensionCommandContext): Promise<void> {
+  const parsed = parseCommandArgs(args);
+  const scope = parseVaultScopeOrNotify(parsed, ctx);
+  if (!scope) return;
+
+  try {
+    const projectId = getProjectId(ctx.cwd);
+    const result = initVault(scope, projectId, ctx.cwd);
+    ctx.ui.notify(
+      result.created
+        ? `Initialized ${scope} memory vault at ${result.path}`
+        : `${scope} memory vault already initialized at ${result.path}`,
+      "info",
+    );
+  } catch (err) {
+    ctx.ui.notify(`Memory vault init failed: ${err instanceof Error ? err.message : String(err)}`, "warning");
+  }
+}
+
+async function handleMemoryVaultSync(args: string, ctx: ExtensionCommandContext): Promise<void> {
+  const parsed = parseCommandArgs(args);
+  const scope = parseVaultScopeOrNotify(parsed, ctx);
+  if (!scope) return;
+
+  try {
+    const projectId = getProjectId(ctx.cwd);
+    const result = syncVault(scope, projectId, ctx.cwd);
+    ctx.ui.notify(
+      `Synced ${result.records} memory records to ${result.path} (${result.pagesWritten} page${result.pagesWritten === 1 ? "" : "s"} written). Registry: ${result.registryPath}`,
+      "info",
+    );
+  } catch (err) {
+    ctx.ui.notify(`Memory vault sync failed: ${err instanceof Error ? err.message : String(err)}`, "warning");
+  }
+}
+
+async function handleMemoryVaultStatus(args: string, ctx: ExtensionCommandContext): Promise<void> {
+  const parsed = parseCommandArgs(args);
+  const scope = parseVaultScopeOrNotify(parsed, ctx);
+  if (!scope) return;
+
+  const projectId = getProjectId(ctx.cwd);
+  const status = getVaultStatus(scope, projectId, ctx.cwd);
+  const lines: string[] = [];
+  lines.push("📚 Memory Vault Status");
+  lines.push("");
+  lines.push(`  scope: ${scope}`);
+  lines.push(`  path: ${status.path}`);
+  lines.push(`  initialized: ${status.initialized}`);
+  lines.push(`  registry: ${status.registryExists ? "present" : "missing"}`);
+  lines.push(`  markdown pages: ${status.pageCount}`);
+  lines.push(`  synced record pages: ${status.recordPageCount}`);
+  lines.push(`  last sync: ${status.lastSyncedAt ?? "never"}`);
+  ctx.ui.notify(lines.join("\n"), "info");
+}
+
+function parseVaultScopeOrNotify(
+  parsed: ReturnType<typeof parseCommandArgs>,
+  ctx: ExtensionCommandContext,
+): VaultScope | null {
+  const scope = parseVaultScope(parsed);
+  if (!scope) {
+    ctx.ui.notify("Usage: /memory-vault-<init|sync|status> [--project|--personal|--scope project|personal]", "warning");
+    return null;
+  }
+  return scope;
+}
+
 async function handleMemoryForget(args: string, ctx: ExtensionCommandContext): Promise<void> {
   const { softForgetRecord, hardDeleteRecord, getRecord } = await import("../db/index.js");
 
@@ -550,7 +669,7 @@ function parseCommandArgs(args: string): {
     }
 
     const next = parts[i + 1];
-    if (next && !next.startsWith("--") && ["format"].includes(withoutPrefix)) {
+    if (next && !next.startsWith("--") && ["format", "scope"].includes(withoutPrefix)) {
       options.set(withoutPrefix, next);
       i += 1;
     } else {
