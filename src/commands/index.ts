@@ -4,7 +4,17 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { getStats, getLastInjection, getRecord } from "../db/index.js";
+import {
+  getStats,
+  getLastInjection,
+  getRecord,
+  getRecentFilePaths,
+  getPendingJobCount,
+  getLastIndexedState,
+  getAppliedSchemaVersion,
+  getJournalMode,
+  getFtsHealth,
+} from "../db/index.js";
 import { retrieve } from "../retrieval/index.js";
 import { getProjectId, getConfig } from "../config/index.js";
 import {
@@ -289,6 +299,7 @@ export function registerCommands(pi: ExtensionAPI): void {
 
 async function handleMemoryStatus(args: string, ctx: ExtensionCommandContext): Promise<void> {
   const verbose = args.includes("--verbose") || args.includes("-v");
+  const debug = args.includes("--debug");
   const stats = getStats();
 
   const lines: string[] = [];
@@ -304,6 +315,38 @@ async function handleMemoryStatus(args: string, ctx: ExtensionCommandContext): P
     for (const [kind, count] of Object.entries(stats.recordsByKind)) {
       lines.push(`    ${kind}: ${count}`);
     }
+    lines.push("");
+  }
+
+  // Debug: show DB health, sizes, and recent activity
+  if (debug) {
+    const { getDbPath } = await import("../db/index.js");
+    const { statSync } = await import("node:fs");
+    const dbPath = getDbPath();
+    lines.push("  Debug:");
+    lines.push(`    dbPath: ${dbPath}`);
+    for (const suffix of ["", "-wal", "-shm"]) {
+      try {
+        const s = statSync(dbPath + suffix);
+        lines.push(`    memory.db${suffix} size: ${(s.size / 1024).toFixed(1)} KB`);
+      } catch { /* file may not exist */ }
+    }
+    lines.push(`    schemaVersion: ${getAppliedSchemaVersion()}`);
+    lines.push(`    journalMode: ${getJournalMode()}`);
+    const fts = getFtsHealth();
+    lines.push(`    ftsHealth: ${fts.integrity}, rows=${fts.rowCount}`);
+    const lastIndexed = getLastIndexedState();
+    if (lastIndexed) {
+      lines.push(`    lastIndexedSession: ${lastIndexed.session_file}`);
+      lines.push(`    lastIndexedEntryId: ${lastIndexed.last_indexed_entry_id ?? "none"}`);
+    }
+    const sessionId = ctx.sessionManager.getSessionId();
+    const lastInjection = getLastInjection(sessionId);
+    if (lastInjection) {
+      lines.push(`    lastInjection: ${new Date(lastInjection.created_at).toISOString()}`);
+    }
+    const pendingCount = getPendingJobCount();
+    lines.push(`    pendingJobs: ${pendingCount}`);
     lines.push("");
   }
 
@@ -333,8 +376,9 @@ async function handleMemorySearch(args: string, ctx: ExtensionCommandContext): P
 
   const projectId = getProjectId(ctx.cwd);
   const config = getConfig(ctx.cwd);
+  const recentFiles = getRecentFilePaths(projectId, 5);
 
-  const results = retrieve(query, projectId, [], {
+  const results = retrieve(query, projectId, recentFiles, {
     limit: 20,
     crossProjectEnabled: config.crossProjectEnabled,
   });

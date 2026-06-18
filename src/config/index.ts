@@ -5,7 +5,7 @@
  */
 
 import { execSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { InjectionMode } from "../session-state/index.js";
@@ -70,13 +70,11 @@ const DEFAULT_CONFIG: MemoryConfig = {
 
 const _configCache: Map<string, MemoryConfig> = new Map();
 
-export function getConfig(cwd: string = process.cwd()): MemoryConfig {
-  const cacheKey = cwd;
-  const cached = _configCache.get(cacheKey);
-  if (cached) return cached;
+/** Track .pi/settings.json mtimes per project for change detection */
+const _configMtimes: Map<string, number> = new Map();
 
-  // Try loading from project .pi/settings.json
-  const projectSettings = join(cwd, ".pi", "settings.json");
+function loadConfigFromDisk(projectRoot: string): MemoryConfig {
+  const projectSettings = join(projectRoot, ".pi", "settings.json");
 
   if (existsSync(projectSettings)) {
     try {
@@ -87,7 +85,6 @@ export function getConfig(cwd: string = process.cwd()): MemoryConfig {
         if (config.injectionMode !== "auto" && config.injectionMode !== "manual") {
           config.injectionMode = DEFAULT_CONFIG.injectionMode;
         }
-        _configCache.set(cacheKey, config);
         return config;
       }
     } catch {
@@ -95,13 +92,42 @@ export function getConfig(cwd: string = process.cwd()): MemoryConfig {
     }
   }
 
-  const config = { ...DEFAULT_CONFIG };
+  return { ...DEFAULT_CONFIG };
+}
+
+export function getConfig(cwd: string = process.cwd()): MemoryConfig {
+  const projectRoot = getProjectId(cwd) ?? cwd;
+  const cacheKey = projectRoot;
+
+  // Check if settings file changed since last load
+  const projectSettings = join(projectRoot, ".pi", "settings.json");
+  let fileMtime = 0;
+  try {
+    fileMtime = statSync(projectSettings).mtimeMs;
+  } catch {
+    // File doesn't exist — use cache if available
+  }
+  const cachedMtime = _configMtimes.get(cacheKey);
+
+  if (cachedMtime !== undefined && cachedMtime === fileMtime) {
+    const cached = _configCache.get(cacheKey);
+    if (cached) return cached;
+  }
+
+  // Load or reload config from the resolved project root
+  const config = loadConfigFromDisk(projectRoot);
   _configCache.set(cacheKey, config);
+  if (fileMtime > 0) {
+    _configMtimes.set(cacheKey, fileMtime);
+  } else {
+    _configMtimes.delete(cacheKey);
+  }
   return config;
 }
 
 export function reloadConfig(): void {
   _configCache.clear();
+  _configMtimes.clear();
 }
 
 // ─── Environment ────────────────────────────────────────────────────

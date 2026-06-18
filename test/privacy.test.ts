@@ -94,6 +94,26 @@ describe("isSensitiveForGlobalMemory", () => {
   it("allows portable user preferences", () => {
     assert.equal(isSensitiveForGlobalMemory("User prefers concise bullet points."), false);
   });
+
+  it("does not flag standalone filenames or generic technical words", () => {
+    assert.equal(isSensitiveForGlobalMemory("Use .ts for examples"), false);
+    assert.equal(isSensitiveForGlobalMemory("Use file.ts for examples"), false);
+    assert.equal(isSensitiveForGlobalMemory("I prefer explicit schemas"), false);
+    assert.equal(isSensitiveForGlobalMemory("The table has a column"), false);
+    assert.equal(isSensitiveForGlobalMemory("localhost"), false);
+    assert.equal(isSensitiveForGlobalMemory("localhost:8080"), false);
+    assert.equal(isSensitiveForGlobalMemory("schema.json"), false);
+    assert.equal(isSensitiveForGlobalMemory("query.sql"), false);
+  });
+
+  it("flags repo paths, sensitive filenames, and hostnames that look like extensions", () => {
+    assert.equal(isSensitiveForGlobalMemory("Implementation detail lives in src/privacy/index.ts"), true);
+    assert.equal(isSensitiveForGlobalMemory("Store settings in .env.local"), true);
+    assert.equal(isSensitiveForGlobalMemory("Backup is prod.sqlite"), true);
+    assert.equal(isSensitiveForGlobalMemory("Use private.key for signing"), true);
+    assert.equal(isSensitiveForGlobalMemory("API lives at api.foo.rs"), true);
+    assert.equal(isSensitiveForGlobalMemory("Script host is service.internal.sh"), true);
+  });
 });
 
 describe("isSensitivePath", () => {

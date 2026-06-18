@@ -3,8 +3,9 @@
  * Uses node:sqlite (DatabaseSync) for synchronous SQLite operations.
  */
 
-import { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "node:sqlite";
 import { chmodSync, existsSync, mkdirSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { redactSecrets } from "../privacy/index.js";
@@ -35,6 +36,47 @@ export const DB_DIR = getDbDir();
 
 // ─── Singleton ──────────────────────────────────────────────────────
 
+const require = createRequire(import.meta.url);
+type DatabaseSyncConstructor = new (path: string) => DatabaseSync;
+let DatabaseSyncClass: DatabaseSyncConstructor | null = null;
+
+function isNodeSQLiteExperimentalWarning(warning: string | Error, firstArg: unknown): boolean {
+  const message = warning instanceof Error ? warning.message : String(warning);
+  const type = warning instanceof Error
+    ? warning.name
+    : typeof firstArg === "string"
+      ? firstArg
+      : typeof firstArg === "object" && firstArg !== null && "type" in firstArg
+        ? String((firstArg as { type?: unknown }).type)
+        : undefined;
+
+  return type === "ExperimentalWarning"
+    && message.includes("SQLite is an experimental feature");
+}
+
+function loadDatabaseSync(): DatabaseSyncConstructor {
+  if (DatabaseSyncClass) return DatabaseSyncClass;
+
+  // node:sqlite is still marked experimental in Node 22, so importing it emits
+  // a process warning. pi surfaces stderr from extension loading as
+  // "[mcp-bridge]" noise, which is not actionable for users. Suppress only this
+  // specific warning while loading the built-in module; all other warnings keep
+  // their normal behaviour.
+  const originalEmitWarning = process.emitWarning;
+  process.emitWarning = ((warning: string | Error, ...args: any[]) => {
+    if (isNodeSQLiteExperimentalWarning(warning, args[0])) return;
+    return (originalEmitWarning as any).call(process, warning, ...args);
+  }) as typeof process.emitWarning;
+
+  try {
+    const sqlite = require("node:sqlite") as { DatabaseSync: DatabaseSyncConstructor };
+    DatabaseSyncClass = sqlite.DatabaseSync;
+    return DatabaseSyncClass;
+  } finally {
+    process.emitWarning = originalEmitWarning;
+  }
+}
+
 let _db: DatabaseSync | null = null;
 
 export function getDb(): DatabaseSync {
@@ -44,6 +86,7 @@ export function getDb(): DatabaseSync {
       mkdirSync(dbDir, { recursive: true, mode: 0o700 });
     }
     hardenPathPermissions(dbDir, 0o700);
+    const DatabaseSync = loadDatabaseSync();
     _db = new DatabaseSync(getDbPath());
     hardenDbFilePermissions();
     _db.exec("PRAGMA journal_mode = WAL");
@@ -83,6 +126,23 @@ export function closeDb(): void {
     } catch {}
     _db = null;
   }
+  _stmtCache.clear();
+}
+
+// ─── Prepared statement cache ─────────────────────────────────────
+
+const _stmtCache = new Map<string, ReturnType<DatabaseSync["prepare"]>>();
+
+/**
+ * Returns a cached prepared statement for the given SQL.
+ * Cache is invalidated on closeDb().
+ */
+function prepareStmt(sql: string): ReturnType<DatabaseSync["prepare"]> {
+  const cached = _stmtCache.get(sql);
+  if (cached) return cached;
+  const stmt = getDb().prepare(sql);
+  _stmtCache.set(sql, stmt);
+  return stmt;
 }
 
 // ─── Migrations ─────────────────────────────────────────────────────
@@ -280,7 +340,7 @@ export function upsertRecord(record: {
   const redactedText = redactSecrets(record.text);
   const redactedTags = record.tags ? redactSecrets(record.tags) : null;
   const id = recordIdentityHash(redactedText, record.kind, scope, projectId);
-  const existing = db.prepare("SELECT id, status FROM records WHERE id = ?").get(id) as
+  const existing = prepareStmt("SELECT id, status FROM records WHERE id = ?").get(id) as
     | { id: string; status: RecordStatus }
     | undefined;
 
@@ -339,10 +399,10 @@ export function upsertRecord(record: {
   }
 
   // Rebuild FTS: delete then re-insert
-  db.prepare("DELETE FROM record_fts WHERE rowid = (SELECT rowid FROM records WHERE id = ?)").run(id);
-  const row = db.prepare("SELECT rowid FROM records WHERE id = ?").get(id) as { rowid: number };
+  prepareStmt("DELETE FROM record_fts WHERE rowid = (SELECT rowid FROM records WHERE id = ?)").run(id);
+  const row = prepareStmt("SELECT rowid FROM records WHERE id = ?").get(id) as { rowid: number };
   if (row) {
-    db.prepare("INSERT INTO record_fts(rowid, text, tags) VALUES (?, ?, ?)").run(
+    prepareStmt("INSERT INTO record_fts(rowid, text, tags) VALUES (?, ?, ?)").run(
       row.rowid,
       redactedText,
       redactedTags ?? "",
@@ -353,19 +413,89 @@ export function upsertRecord(record: {
 }
 
 export function getRecord(id: string): RecordRow | undefined {
-  const db = getDb();
   return (
-    (db.prepare("SELECT * FROM records WHERE id = ?").get(id) as RecordRow | undefined) ?? undefined
+    (prepareStmt("SELECT * FROM records WHERE id = ?").get(id) as RecordRow | undefined) ?? undefined
   );
 }
 
 export function listRecords(options: { includeInactive?: boolean } = {}): RecordRow[] {
-  const db = getDb();
   const sql = options.includeInactive
     ? "SELECT * FROM records ORDER BY created_at ASC, id ASC"
     : "SELECT * FROM records WHERE status = 'active' ORDER BY created_at ASC, id ASC";
-  return db.prepare(sql).all() as unknown as RecordRow[];
+  return prepareStmt(sql).all() as unknown as RecordRow[];
 }
+
+// ─── FTS query builder ─────────────────────────────────────────────
+
+/**
+ * Build an FTS5 MATCH query from raw user text.
+ * Default semantics: AND (all terms must match), with stop-word filtering.
+ * Quoted phrases ("exact phrase") are preserved as phrase matches.
+ * Set matchAny=true for OR semantics.
+ */
+export function buildFtsQuery(rawQuery: string, matchAny = false): string {
+  const parts: string[] = [];
+
+  // Extract quoted phrases from original query (exact phrase matching)
+  const phraseRegex = /"([^"]+)"/g;
+  let m: RegExpExecArray | null;
+  while ((m = phraseRegex.exec(rawQuery)) !== null) {
+    const phrase = m[1].replace(/[^a-zA-Z0-9_\s-]/g, " ").replace(/\s+/g, " ").trim();
+    if (phrase) parts.push(`"${phrase}"`);
+  }
+
+  // Remove quoted phrases, then extract remaining terms
+  const withoutPhrases = rawQuery.replace(/"[^"]+"/g, " ");
+  const rawTerms = withoutPhrases
+    .replace(/[^\w\s-]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+
+  // In AND mode, filter out short/noise terms that harm recall.
+  // Short words (1-2 chars) and common stop words spanning file names
+  // rarely appear in stored memories. In OR mode, keep all terms.
+  const terms = matchAny
+    ? rawTerms
+    : rawTerms.filter((t) => {
+        // Keep terms ≥3 characters (filter out "a", "an", "is", "ts", etc.)
+        if (t.length < 3) return false;
+        // Filter common command/action words unlikely to appear in stored memories
+        const lower = t.toLowerCase();
+        if (STOP_WORDS.has(lower)) return false;
+        return true;
+      });
+
+  for (const t of terms) parts.push(`"${t}"`);
+
+  if (parts.length === 0) return "";
+
+  const joiner = matchAny ? " OR " : " AND ";
+  return parts.join(joiner);
+}
+
+/**
+ * Common English stop words and action/command words that rarely appear
+ * in stored memory records. Filtered out in AND mode to avoid overly
+ * restrictive queries.
+ */
+const STOP_WORDS = new Set([
+  // Common English
+  'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'had',
+  'her', 'was', 'one', 'our', 'out', 'has', 'his', 'she', 'new', 'its',
+  'did', 'get', 'got', 'let', 'put', 'run', 'set', 'way', 'who', 'why',
+  'how', 'any', 'few', 'own', 'see', 'too', 'yes', 'yet', 'ago', 'big',
+  'use', 'may', 'try', 'old', 'end', 'top', 'low', 'off', 'nor',
+  // Command / action words (rare in stored memories)
+  'fix', 'add', 'make', 'help', 'need', 'want', 'like', 'tell', 'show',
+  'find', 'look', 'take', 'keep', 'give', 'send', 'read', 'call', 'move',
+  'open', 'turn', 'pick', 'pull', 'push', 'drop', 'save', 'load', 'stop',
+  'test', 'check', 'edit', 'copy', 'sort', 'fill', 'join', 'send', 'exit',
+  'back', 'next', 'last', 'just', 'also', 'then', 'than', 'very', 'much',
+  'here', 'into', 'each', 'some', 'most', 'done', 'good', 'only', 'well',
+  'even', 'must', 'both', 'many', 'more', 'over', 'will', 'what', 'when',
+  'have', 'been', 'that', 'this', 'with', 'they', 'from', 'your', 'them',
+  'about', 'which', 'would', 'these', 'their', 'there', 'could', 'shall',
+]);
 
 export function searchRecordsFts(
   query: string,
@@ -374,37 +504,41 @@ export function searchRecordsFts(
   scopeFilter?: RecordScope[],
   projectId?: string,
   excludeStatuses?: RecordStatus[],
+  matchAny = false,
 ): (RecordRow & { rank: number })[] {
-  const db = getDb();
-
-  // Sanitize FTS query: escape special chars, split into terms
-  const terms = query
-    .replace(/[^\w\s-]/g, " ")
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((t) => `"${t}"`)
-    .join(" OR ");
-
+  const terms = buildFtsQuery(query, matchAny);
   if (!terms) return [];
 
   const safeLimit = Math.max(1, Math.min(200, Number.isFinite(limit) ? Math.floor(limit) : 20));
+  const hasProjectFilter = projectId !== undefined;
 
-  const results = db
-    .prepare(
-      `SELECT r.*, fts.rank as rank
-       FROM record_fts fts
-       JOIN records r ON r.rowid = fts.rowid
-       WHERE record_fts MATCH ?
-       ORDER BY rank
-       LIMIT ?`
-    )
-    .all(terms, safeLimit) as unknown as (RecordRow & { rank: number })[];
+  function runQuery(ftsQuery: string, rawLimit: number): (RecordRow & { rank: number })[] {
+    return hasProjectFilter
+      ? (prepareStmt(
+          `SELECT r.*, fts.rank as rank
+           FROM record_fts fts
+           JOIN records r ON r.rowid = fts.rowid
+           WHERE record_fts MATCH ?
+             AND (r.scope = 'global' OR r.project_id = ?)
+           ORDER BY rank
+           LIMIT ?`
+        ).all(ftsQuery, projectId, rawLimit) as unknown as (RecordRow & { rank: number })[])
+      : (prepareStmt(
+          `SELECT r.*, fts.rank as rank
+           FROM record_fts fts
+           JOIN records r ON r.rowid = fts.rowid
+           WHERE record_fts MATCH ?
+           ORDER BY rank
+           LIMIT ?`
+        ).all(ftsQuery, rawLimit) as unknown as (RecordRow & { rank: number })[]);
+  }
 
-  // Apply post-filters
+  const results = runQuery(terms, safeLimit);
+
+  // Apply remaining post-filters (kind, scope, excludeStatus)
   return results.filter((r) => {
     if (kindFilter && !kindFilter.includes(r.kind)) return false;
     if (scopeFilter && !scopeFilter.includes(r.scope)) return false;
-    if (projectId !== undefined && r.project_id !== projectId) return false;
     if (excludeStatuses && excludeStatuses.includes(r.status)) return false;
     return true;
   });
@@ -419,6 +553,7 @@ export interface FileActivityRow {
   path: string;
   action: FileAction;
   entry_id: string | null;
+  created_at: number | null;
 }
 
 export function insertFileActivity(activity: {
@@ -427,20 +562,38 @@ export function insertFileActivity(activity: {
   path: string;
   action: FileAction;
   entry_id?: string | null;
+  created_at?: number | null;
 }): void {
   const db = getDb();
   const id = newId();
+  const now = activity.created_at ?? Date.now();
   db.prepare(`
-    INSERT INTO file_activity (id, record_id, project_id, path, action, entry_id)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(id, activity.record_id ?? null, activity.project_id ?? null, activity.path, activity.action, activity.entry_id ?? null);
+    INSERT INTO file_activity (id, record_id, project_id, path, action, entry_id, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(id, activity.record_id ?? null, activity.project_id ?? null, activity.path, activity.action, activity.entry_id ?? null, now);
 }
 
 export function getFileActivityByRecord(recordId: string): FileActivityRow[] {
-  const db = getDb();
-  return db
-    .prepare("SELECT * FROM file_activity WHERE record_id = ?")
+  return prepareStmt("SELECT * FROM file_activity WHERE record_id = ?")
     .all(recordId) as unknown as FileActivityRow[];
+}
+
+/**
+ * Get recently active file paths for a project.
+ * Filters to entries created within the last `sinceMinutes` minutes and
+ * returns up to `limit` unique paths ordered by recency.
+ */
+export function getRecentFilePaths(projectId: string | null, limit = 5, sinceMinutes = 60): string[] {
+  if (!projectId) return [];
+  const sinceMs = Date.now() - Math.max(0, sinceMinutes) * 60 * 1000;
+  const rows = prepareStmt(
+    `SELECT path FROM file_activity
+     WHERE project_id = ? AND created_at > ?
+     GROUP BY path
+     ORDER BY MAX(created_at) DESC
+     LIMIT ?`
+  ).all(projectId, sinceMs, limit) as { path: string }[];
+  return rows.map((r) => r.path);
 }
 
 // ─── Index State ────────────────────────────────────────────────────
@@ -626,10 +779,10 @@ export function getStats(): {
   recordsByKind: Record<string, number>;
 } {
   const db = getDb();
-  const totalRecords = (db.prepare("SELECT COUNT(*) as c FROM records WHERE status = 'active'").get() as { c: number }).c;
-  const totalSessions = (db.prepare("SELECT COUNT(*) as c FROM sessions WHERE source_status = 'active'").get() as { c: number }).c;
-  const totalFileActivity = (db.prepare("SELECT COUNT(*) as c FROM file_activity").get() as { c: number }).c;
-  const kindRows = db.prepare("SELECT kind, COUNT(*) as c FROM records WHERE status = 'active' GROUP BY kind").all() as { kind: string; c: number }[];
+  const totalRecords = (prepareStmt("SELECT COUNT(*) as c FROM records WHERE status = 'active'").get() as { c: number }).c;
+  const totalSessions = (prepareStmt("SELECT COUNT(*) as c FROM sessions WHERE source_status = 'active'").get() as { c: number }).c;
+  const totalFileActivity = (prepareStmt("SELECT COUNT(*) as c FROM file_activity").get() as { c: number }).c;
+  const kindRows = prepareStmt("SELECT kind, COUNT(*) as c FROM records WHERE status = 'active' GROUP BY kind").all() as { kind: string; c: number }[];
   const recordsByKind: Record<string, number> = {};
   for (const r of kindRows) {
     recordsByKind[r.kind] = r.c;
@@ -637,22 +790,69 @@ export function getStats(): {
   return { totalRecords, totalSessions, totalFileActivity, recordsByKind };
 }
 
+export function getPendingJobCount(type?: string): number {
+  const db = getDb();
+  if (type) {
+    return (db.prepare("SELECT COUNT(*) as c FROM jobs WHERE status = 'pending' AND type = ?").get(type) as { c: number }).c;
+  }
+  return (db.prepare("SELECT COUNT(*) as c FROM jobs WHERE status = 'pending'").get() as { c: number }).c;
+}
+
+export function getLastIndexedState(): { session_file: string; last_indexed_entry_id: string | null } | undefined {
+  const row = prepareStmt(
+    "SELECT session_file, last_indexed_entry_id FROM index_state ORDER BY rowid DESC LIMIT 1"
+  ).get() as { session_file: string; last_indexed_entry_id: string | null } | undefined;
+  return row ?? undefined;
+}
+
+export function getAppliedSchemaVersion(): number {
+  try {
+    const row = prepareStmt("SELECT MAX(version) as v FROM schema_migrations").get() as { v: number } | undefined;
+    return row?.v ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+export function getJournalMode(): string {
+  try {
+    const row = getDb().prepare("PRAGMA journal_mode").get() as { journal_mode: string } | undefined;
+    return row?.journal_mode ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+export function getFtsHealth(): { rowCount: number; integrity: string } {
+  const db = getDb();
+  let integrity = "ok";
+  try {
+    const row = db.prepare("PRAGMA integrity_check").get() as { integrity_check: string } | undefined;
+    if (row && row.integrity_check !== "ok") {
+      integrity = row.integrity_check;
+    }
+  } catch {
+    integrity = "check_failed";
+  }
+  const rowCount = (db.prepare("SELECT COUNT(*) as c FROM record_fts").get() as { c: number }).c;
+  return { rowCount, integrity };
+}
+
 // ─── Forgetting ─────────────────────────────────────────────────────
 
 export function softForgetRecord(id: string): boolean {
-  const db = getDb();
-  const result = db.prepare("UPDATE records SET status = 'soft_forgotten', updated_at = ? WHERE id = ?").run(Date.now(), id);
+  const result = prepareStmt("UPDATE records SET status = 'soft_forgotten', updated_at = ? WHERE id = ?")
+    .run(Date.now(), id);
   return result.changes > 0;
 }
 
 export function hardDeleteRecord(id: string): boolean {
-  const db = getDb();
-  const row = db.prepare("SELECT rowid FROM records WHERE id = ?").get(id) as { rowid: number } | undefined;
+  const row = prepareStmt("SELECT rowid FROM records WHERE id = ?").get(id) as { rowid: number } | undefined;
   if (row) {
-    db.prepare("DELETE FROM record_fts WHERE rowid = ?").run(row.rowid);
+    prepareStmt("DELETE FROM record_fts WHERE rowid = ?").run(row.rowid);
   }
-  db.prepare("DELETE FROM file_activity WHERE record_id = ?").run(id);
-  db.prepare("DELETE FROM injections WHERE ',' || COALESCE(injected_refs, '') || ',' LIKE ?").run(`%,${id},%`);
-  const result = db.prepare("DELETE FROM records WHERE id = ?").run(id);
+  prepareStmt("DELETE FROM file_activity WHERE record_id = ?").run(id);
+  prepareStmt("DELETE FROM injections WHERE ',' || COALESCE(injected_refs, '') || ',' LIKE ?").run(`%,${id},%`);
+  const result = prepareStmt("DELETE FROM records WHERE id = ?").run(id);
   return result.changes > 0;
 }

@@ -23,6 +23,8 @@ export interface ParsedTurn {
   toolCalls: ParsedToolCall[];
   /** Errors encountered in this turn */
   errors: ParsedError[];
+  /** Last entry ID seen in this turn (for entryIdEnd) */
+  lastEntryId: string;
 }
 
 export interface ParsedToolCall {
@@ -144,6 +146,11 @@ function detectFileActivity(
       }
       break;
     case "bash": {
+      const command = typeof args.command === "string" ? args.command : undefined;
+      if (command) {
+        const bashActivities = detectBashFileActivity(command, entryId);
+        activities.push(...bashActivities);
+      }
       break;
     }
   }
@@ -158,15 +165,49 @@ function detectBashFileActivity(
   const activities: ParsedFileActivity[] = [];
   const seen = new Set<string>();
 
-  // Detect file paths in git commands
-  const gitFilePattern = /\s([\w.\-/]+\.(?:ts|tsx|js|jsx|py|rs|go|java|rb|php|css|html|json|yaml|yml|toml|md|sql|sh|bash|zsh))/g;
-  let match: RegExpExecArray | null;
-  while ((match = gitFilePattern.exec(command)) !== null) {
-    const filePath = match[1];
-    if (!seen.has(filePath) && !shouldIgnoreFile(filePath)) {
-      seen.add(filePath);
-      activities.push({ entryId, path: filePath, action: "bash" });
+  function addPath(path: string) {
+    // Clean up path - remove quotes, trailing slashes, and common punctuation
+    const cleaned = path.replace(/^['"]|['"]$/g, '').replace(/[),]+$/g, '').replace(/\/$/, '');
+
+    if (!cleaned || cleaned.length < 2) return;
+    if (!shouldIgnoreFile(cleaned) && !seen.has(cleaned)) {
+      seen.add(cleaned);
+      activities.push({ entryId, path: cleaned, action: "bash" });
     }
+  }
+
+  function shellTokens(text: string): string[] {
+    return Array.from(text.matchAll(/"[^"]+"|'[^']+'|\S+/g), (m) => m[0]);
+  }
+
+  // 1. Detect quoted paths (both single and double quotes)
+  const quotedPathPattern = /['"]([^'"]*\/[^"]+)['"]/g;
+  let match: RegExpExecArray | null;
+  while ((match = quotedPathPattern.exec(command)) !== null) {
+    addPath(match[1]);
+  }
+
+  // 2. Detect all path-like arguments after file-related commands.
+  // Handles multi-arg commands such as `git diff -- src/file.ts`,
+  // `cp src/a.ts src/b.ts`, and `mv old.ts new.ts`.
+  const fileCommandPattern = /(?:^|[|;&]\s*)(?:cat|cp|mv|rm|ls|source|\.|git\s+(?:add|diff|checkout|commit|log|show))\s+([^|;&]+)/g;
+  while ((match = fileCommandPattern.exec(command)) !== null) {
+    for (const token of shellTokens(match[1])) {
+      if (token === "--" || token.startsWith("-")) continue;
+      addPath(token);
+    }
+  }
+
+  // 3. Detect paths after file-related flags: -f, --file, >, >>, <
+  const fileFlagPattern = /(?:-f|--file|>>|>|<)\s*([^|;&\s]+)/g;
+  while ((match = fileFlagPattern.exec(command)) !== null) {
+    addPath(match[1]);
+  }
+
+  // 4. Detect file paths with common extensions (fallback)
+  const gitFilePattern = /\s([\w.\-/]+\.(?:ts|tsx|js|jsx|py|rs|go|java|rb|php|css|html|json|yaml|yml|toml|md|sql|sh|bash|zsh))/g;
+  while ((match = gitFilePattern.exec(command)) !== null) {
+    addPath(match[1]);
   }
 
   return activities;
@@ -224,6 +265,7 @@ export function parseEntries(entries: SessionEntry[]): {
         assistantText: "",
         toolCalls: [],
         errors: [],
+        lastEntryId: entry.id,
       };
       continue;
     }
@@ -232,6 +274,7 @@ export function parseEntries(entries: SessionEntry[]): {
     if (msg.role === "assistant") {
       if (!currentTurn) continue;
 
+      currentTurn.lastEntryId = entry.id;
       currentTurn.assistantEntryIds.push(entry.id);
       const text = extractText(msg.content);
       const thinking = extractThinking(msg.content);
@@ -259,6 +302,7 @@ export function parseEntries(entries: SessionEntry[]): {
     if (msg.role === "toolResult") {
       if (!currentTurn) continue;
 
+      currentTurn.lastEntryId = entry.id;
       const toolName = msg.toolName || "unknown";
       const resultText = extractText(msg.content);
 
@@ -295,6 +339,7 @@ export function parseEntries(entries: SessionEntry[]): {
     if (msg.role === "bashExecution") {
       if (!currentTurn) continue;
 
+      currentTurn.lastEntryId = entry.id;
       const command = (msg as Record<string, unknown>).command as string | undefined;
       if (command) {
         const bashActivities = detectBashFileActivity(command, entry.id);
@@ -355,7 +400,7 @@ export function turnsToRecords(
       scope: "project",
       text,
       entryIdStart: turn.userEntryId,
-      entryIdEnd: turn.toolCalls.length > 0 ? turn.toolCalls[turn.toolCalls.length - 1].entryId : turn.userEntryId,
+      entryIdEnd: turn.lastEntryId,
     });
 
     // Error records

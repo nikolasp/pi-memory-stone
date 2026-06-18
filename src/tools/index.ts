@@ -5,8 +5,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
-import { getRecord, softForgetRecord, upsertRecord } from "../db/index.js";
-import { retrieve, buildInjectionPacket, formatInjectionForLlm, normalizeRetrievalLimit } from "../retrieval/index.js";
+import { getRecord, getRecentFilePaths, softForgetRecord, upsertRecord } from "../db/index.js";
+import { retrieve, normalizeRetrievalLimit } from "../retrieval/index.js";
 import { getProjectId, getConfig } from "../config/index.js";
 import { isSensitiveForGlobalMemory } from "../privacy/index.js";
 import { isRecordVisibleInProject } from "../session-state/index.js";
@@ -46,7 +46,8 @@ export function registerTools(pi: ExtensionAPI): void {
       const config = getConfig(ctx.cwd);
       const limit = normalizeRetrievalLimit(params.limit, 5);
 
-      const results = retrieve(params.query, projectId, [], {
+      const recentFiles = getRecentFilePaths(projectId, 5);
+      const results = retrieve(params.query, projectId, recentFiles, {
         limit,
         crossProjectEnabled: params.scope === "global" || config.crossProjectEnabled,
         kindFilter: params.kind ? [params.kind as RecordKind] : undefined,
@@ -60,11 +61,16 @@ export function registerTools(pi: ExtensionAPI): void {
         };
       }
 
-      const packet = buildInjectionPacket(results);
-      const formatted = formatInjectionForLlm(packet, 2000);
+      // Concise numbered list for LLM readability
+      const numberedList = results
+        .map(
+          (r, i) =>
+            `${i + 1}. [${r.record.kind}] ref=${r.record.id} score=${r.score.toFixed(2)} — ${r.record.text.slice(0, 200)}`,
+        )
+        .join("\n");
 
       return {
-        content: [{ type: "text", text: formatted }],
+        content: [{ type: "text", text: numberedList }],
         details: {
           query: params.query,
           results: results.map((r) => ({

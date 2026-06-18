@@ -3,7 +3,7 @@
  * Versioned migrations applied sequentially.
  */
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export interface Migration {
   version: number;
@@ -125,6 +125,14 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_injections_session ON injections(session_id);
     `,
   },
+  {
+    version: 2,
+    name: "file-activity-timestamp",
+    sql: `
+      ALTER TABLE file_activity ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0;
+      CREATE INDEX IF NOT EXISTS idx_file_activity_created_at ON file_activity(created_at);
+    `,
+  },
 ];
 
 /** Record kinds */
@@ -135,7 +143,6 @@ export const RECORD_KINDS = [
   "preference",
   "task",
   "error_resolution",
-  "file_activity",
 ] as const;
 
 export type RecordKind = (typeof RECORD_KINDS)[number];
