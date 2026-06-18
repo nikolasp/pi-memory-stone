@@ -23,6 +23,8 @@ export interface ParsedTurn {
   toolCalls: ParsedToolCall[];
   /** Errors encountered in this turn */
   errors: ParsedError[];
+  /** File activity detected within this turn */
+  fileActivities?: ParsedFileActivity[];
   /** Last entry ID seen in this turn (for entryIdEnd) */
   lastEntryId: string;
 }
@@ -265,6 +267,7 @@ export function parseEntries(entries: SessionEntry[]): {
         assistantText: "",
         toolCalls: [],
         errors: [],
+        fileActivities: [],
         lastEntryId: entry.id,
       };
       continue;
@@ -289,7 +292,9 @@ export function parseEntries(entries: SessionEntry[]): {
           resultText: "",
           isError: false,
         });
-        fileActivities.push(...detectFileActivity(call.name, call.arguments, entry.id));
+        const detectedActivities = detectFileActivity(call.name, call.arguments, entry.id);
+        currentTurn.fileActivities?.push(...detectedActivities);
+        fileActivities.push(...detectedActivities);
       }
 
       if (text || thinking) {
@@ -343,6 +348,7 @@ export function parseEntries(entries: SessionEntry[]): {
       const command = (msg as Record<string, unknown>).command as string | undefined;
       if (command) {
         const bashActivities = detectBashFileActivity(command, entry.id);
+        currentTurn.fileActivities?.push(...bashActivities);
         fileActivities.push(...bashActivities);
       }
       continue;
@@ -401,6 +407,7 @@ export function turnsToRecords(
       text,
       entryIdStart: turn.userEntryId,
       entryIdEnd: turn.lastEntryId,
+      fileActivities: turn.fileActivities ?? [],
     });
 
     // Error records

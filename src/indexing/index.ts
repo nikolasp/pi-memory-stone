@@ -11,9 +11,8 @@ import {
   insertFileActivity,
   getIndexState,
   upsertIndexState,
-  contentHash,
 } from "../db/index.js";
-import { parseEntries, turnsToRecords, type ParsedFileActivity } from "./parser.js";
+import { parseEntries, turnsToRecords } from "./parser.js";
 import { getProjectId } from "../config/index.js";
 
 // ─── Types for agent_end data ───────────────────────────────────────
@@ -151,7 +150,7 @@ export async function indexSessionOnAgentEnd(
     }
 
     // Parse new entries
-    const { turns, fileActivities } = parseEntries(newEntries);
+    const { turns } = parseEntries(newEntries);
 
     // Convert to records
     const recordPayloads = turnsToRecords(turns, projectId, sessionId, sessionFile);
@@ -166,10 +165,11 @@ export async function indexSessionOnAgentEnd(
       file_size: fileSize,
     });
 
-    // Store records
+    // Store records, then attach file activity to the parent turn-summary record.
     for (const payload of recordPayloads) {
+      let recordId: string;
       try {
-        upsertRecord({
+        recordId = upsertRecord({
           kind: payload.kind,
           scope: payload.scope,
           project_id: projectId,
@@ -184,25 +184,22 @@ export async function indexSessionOnAgentEnd(
         recordsCreated++;
       } catch (err) {
         errors.push(`Failed to store record: ${err instanceof Error ? err.message : String(err)}`);
+        continue;
       }
-    }
 
-    // Store file activity
-    for (const fa of fileActivities) {
-      try {
-        insertFileActivity({
-          record_id: contentHash(
-            `file:${fa.path}:${fa.action}`,
-            "file_activity",
-          ),
-          project_id: projectId,
-          path: fa.path,
-          action: fa.action,
-          entry_id: fa.entryId,
-        });
-      } catch (err) {
-        // Non-critical: file activity insertion failure is logged but not fatal
-        errors.push(`Failed to store file activity: ${err instanceof Error ? err.message : String(err)}`);
+      for (const fa of payload.fileActivities ?? []) {
+        try {
+          insertFileActivity({
+            record_id: recordId,
+            project_id: projectId,
+            path: fa.path,
+            action: fa.action,
+            entry_id: fa.entryId,
+          });
+        } catch (err) {
+          // Non-critical: file activity insertion failure is logged but not fatal
+          errors.push(`Failed to store file activity: ${err instanceof Error ? err.message : String(err)}`);
+        }
       }
     }
 

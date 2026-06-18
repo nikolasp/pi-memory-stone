@@ -311,16 +311,16 @@ npm run typecheck
 
 These scripts are also runnable from a pi package clone installed from git; the required script runners are regular dependencies because pi package installs omit `devDependencies`.
 
-82 tests across 11 test files:
+84 tests across 11 test files:
 
 | Suite | Tests | Focus |
 |---|---|---|
 | `config.test.ts` | 2 | Project-root config discovery and caching |
 | `db.test.ts` | 4 | FTS semantics and recent-file activity queries |
-| `indexing.test.ts` | 1 | Incremental session indexing |
+| `indexing.test.ts` | 2 | Incremental session indexing and file-activity FK integrity |
 | `parser.test.ts` | 11 | Turn parsing, file activity detection, error extraction |
 | `portable.test.ts` | 5 | JSON/Markdown export, JSON import, SQLite backup |
-| `privacy.test.ts` | 22 | Secret redaction, sensitive path filtering |
+| `privacy.test.ts` | 23 | Secret redaction, sensitive path filtering |
 | `ranking.test.ts` | 18 | Hybrid ranking, cross-project filtering, injection formatting |
 | `session-state.test.ts` | 5 | Injection mode config, session ref selection, manual-only injection |
 | `tools.test.ts` | 2 | Tool visibility and forgetting safety |
