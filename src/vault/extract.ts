@@ -151,14 +151,15 @@ function meta(document: Document, attr: "name" | "property", value: string): str
   return normalizeWhitespace(document.querySelector<HTMLMetaElement>(`meta[${attr}="${value}"]`)?.content ?? "") || undefined;
 }
 
+const _turndown = new TurndownService({
+  headingStyle: "atx",
+  codeBlockStyle: "fenced",
+  bulletListMarker: "-",
+});
+_turndown.remove(["script", "style", "noscript"]);
+
 function htmlFragmentToMarkdown(html: string): string {
-  const turndown = new TurndownService({
-    headingStyle: "atx",
-    codeBlockStyle: "fenced",
-    bulletListMarker: "-",
-  });
-  turndown.remove(["script", "style", "noscript"]);
-  const markdown = turndown.turndown(html)
+  const markdown = _turndown.turndown(html)
     .split(/\r?\n/)
     .map((line) => line.replace(/[ \t]+$/g, ""))
     .join("\n")

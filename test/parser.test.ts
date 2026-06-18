@@ -167,6 +167,24 @@ describe("parseEntries", () => {
     assert.equal(edits[0].path, "src/utils.ts");
   });
 
+  it("detects multiple file arguments in bash commands", () => {
+    const entries = [
+      makeUserEntry("001", "Inspect file changes"),
+      makeAssistantEntry("002", "Running bash.", [
+        {
+          id: "call_1",
+          name: "bash",
+          arguments: { command: "git diff -- src/index.ts && cp src/a.ts src/b.ts && mv old.ts new.ts" },
+        },
+      ]),
+    ];
+
+    const { fileActivities } = parseEntries(entries as any);
+    const paths = fileActivities.map((f) => f.path).sort();
+
+    assert.deepEqual(paths, ["new.ts", "old.ts", "src/a.ts", "src/b.ts", "src/index.ts"]);
+  });
+
   it("skips sensitive file paths", () => {
     const entries = [
       makeUserEntry("001", "Check env"),
@@ -225,6 +243,7 @@ describe("turnsToRecords", () => {
           },
         ],
         errors: [],
+        lastEntryId: "003",
       },
     ];
 
@@ -250,6 +269,7 @@ describe("turnsToRecords", () => {
             message: "Permission denied: cannot write to /etc",
           },
         ],
+        lastEntryId: "003",
       },
     ];
 

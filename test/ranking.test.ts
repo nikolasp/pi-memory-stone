@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   buildSearchQuery,
+  retrieve,
   rankAndFilter,
   buildInjectionPacket,
   formatInjectionForLlm,
@@ -126,19 +127,10 @@ describe("buildSearchQuery", () => {
     assert.ok(query.includes("TypeScript files"));
   });
 
-  it("includes recent file basenames", () => {
-    const query = buildSearchQuery("Fix auth bug", [
-      "src/auth/login.ts",
-      "src/auth/signup.ts",
-    ]);
-    assert.ok(query.includes("login.ts"));
-    assert.ok(query.includes("signup.ts"));
-  });
-
   it("truncates long prompts", () => {
     const longPrompt = "A".repeat(500);
     const query = buildSearchQuery(longPrompt);
-    assert.ok(query.length <= 250);
+    assert.ok(query.length <= 210);
   });
 });
 
@@ -341,6 +333,26 @@ describe("rankAndFilter", () => {
 
     const ranked = rankAndFilter(records, "/home/test-project", false);
     assert.equal(ranked.length, 0);
+  });
+
+  it("retrieves memories that only match a recently touched file", () => {
+    const id = upsertRecord({
+      kind: "decision",
+      scope: "project",
+      project_id: "/home/test-project",
+      text: "Billing module note: billing.ts must keep the gateway import lazy.",
+      tags: "billing,module",
+    });
+
+    const results = retrieve(
+      "unrelated deployment question",
+      "/home/test-project",
+      ["src/billing.ts"],
+      { limit: 5, crossProjectEnabled: false },
+    );
+
+    assert.ok(results.some((r) => r.record.id === id));
+    assert.ok(results.find((r) => r.record.id === id)?.reasons.includes("recent-file"));
   });
 });
 

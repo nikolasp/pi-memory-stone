@@ -20,7 +20,7 @@ import { registerTools } from "./tools/index.js";
 import { indexSessionOnAgentEnd } from "./indexing/index.js";
 import { retrieve, buildInjectionPacket, formatInjectionForLlm } from "./retrieval/index.js";
 import { getProjectId, getConfig, clearProjectCache } from "./config/index.js";
-import { closeDb, getRecord, insertInjection } from "./db/index.js";
+import { closeDb, getRecord, getRecentFilePaths, insertInjection } from "./db/index.js";
 import { getMemorySessionState, manualRecordsToRankedResults } from "./session-state/index.js";
 import { captureUrlToVault } from "./vault/capture.js";
 import { parseVaultCaptureIntent } from "./vault/intent.js";
@@ -28,11 +28,22 @@ import { createHash } from "node:crypto";
 
 // ─── Session-scoped state ───────────────────────────────────────────
 
-/** Track injected refs per turn to prevent feedback loops */
-const injectedRefsThisSession: Set<string> = new Set();
+/** Per-session state: enabled flag and injected refs for feedback-loop prevention */
+interface SessionMemoryState {
+  enabled: boolean;
+  injectedRefs: Set<string>;
+}
 
-/** Whether memory injection is temporarily disabled for this session */
-let sessionEnabled = true;
+const sessionStates = new Map<string, SessionMemoryState>();
+
+function getSessionMemoryState(sessionId: string): SessionMemoryState {
+  let state = sessionStates.get(sessionId);
+  if (!state) {
+    state = { enabled: true, injectedRefs: new Set() };
+    sessionStates.set(sessionId, state);
+  }
+  return state;
+}
 
 async function maybeCaptureVaultUrl(
   prompt: string,
@@ -107,6 +118,9 @@ export default function (pi: ExtensionAPI) {
       const projectId = getProjectId(ctx.cwd);
       const vaultCaptureNotice = await maybeCaptureVaultUrl(prompt, projectId, ctx.cwd, ctx.signal);
 
+      const sessionId = ctx.sessionManager.getSessionId();
+      const memState = getSessionMemoryState(sessionId);
+
       // Check if memory is enabled
       const config = getConfig(ctx.cwd);
       if (!config.enabled) {
@@ -114,9 +128,9 @@ export default function (pi: ExtensionAPI) {
       }
 
       const sessionState = getMemorySessionState(ctx.sessionManager.getBranch());
-      sessionEnabled = sessionState.enabled;
+      memState.enabled = sessionState.enabled;
 
-      if (!sessionEnabled) {
+      if (!memState.enabled) {
         return vaultCaptureNotice ? vaultCaptureReturn(event.systemPrompt || "", vaultCaptureNotice) : undefined;
       }
 
@@ -129,16 +143,20 @@ export default function (pi: ExtensionAPI) {
       const manualResults = manualRecordsToRankedResults(manualRecords, projectId);
       const manualRefSet = new Set(manualResults.map((r) => r.record.id));
 
+      // Reset per-turn dedup: same memory can be re-injected on follow-up turns
+      memState.injectedRefs.clear();
+
       let autoResults: ReturnType<typeof retrieve> = [];
       if (injectionMode === "auto" && prompt.trim()) {
-        const results = retrieve(prompt, projectId, [], {
+        const recentFiles = getRecentFilePaths(projectId, 5);
+        const results = retrieve(prompt, projectId, recentFiles, {
           limit: config.maxInjectedRecords,
           crossProjectEnabled: config.crossProjectEnabled,
         });
 
         autoResults = results
           .filter((r) => !manualRefSet.has(r.record.id))
-          .filter((r) => !injectedRefsThisSession.has(r.record.id))
+          .filter((r) => !memState.injectedRefs.has(r.record.id))
           .filter((r) => r.score >= config.scoreThreshold);
       }
 
@@ -152,7 +170,7 @@ export default function (pi: ExtensionAPI) {
       // Track only search-selected refs. Manually chosen refs are intentionally
       // injected on every turn until /memory-clear-injected is used.
       for (const r of autoResults) {
-        injectedRefsThisSession.add(r.record.id);
+        memState.injectedRefs.add(r.record.id);
       }
 
       if (formatted) {
@@ -194,12 +212,12 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     try {
-      // Clear session-scoped state
-      injectedRefsThisSession.clear();
-      sessionEnabled = true;
+      const sessionId = ctx.sessionManager.getSessionId();
+      const memState = getSessionMemoryState(sessionId);
 
       // Restore session toggle from branch
-      sessionEnabled = getMemorySessionState(ctx.sessionManager.getBranch()).enabled;
+      memState.enabled = getMemorySessionState(ctx.sessionManager.getBranch()).enabled;
+      memState.injectedRefs.clear();
 
       // Clear project ID cache on session change
       clearProjectCache();
@@ -210,21 +228,14 @@ export default function (pi: ExtensionAPI) {
 
   // ── session_shutdown: cleanup ──────────────────────────────────
 
-  pi.on("session_shutdown", async (_event, _ctx) => {
+  pi.on("session_shutdown", async (_event, ctx) => {
     try {
-      // Best-effort flush — DB is WAL mode so writes are already durable.
-      // Cleanup any pending state.
-      injectedRefsThisSession.clear();
+      const sessionId = ctx.sessionManager.getSessionId();
+      sessionStates.delete(sessionId);
     } catch (err) {
       console.error("[pi-memory-stone] session_shutdown handler error:", err);
+    } finally {
+      closeDb();
     }
-  });
-
-  // ── Cleanup when extension is unloaded ─────────────────────────
-
-  // Note: pi doesn't have an explicit unload hook, but session_shutdown
-  // fires before reload. For process exit, Node handles file descriptor cleanup.
-  process.on("exit", () => {
-    closeDb();
   });
 }

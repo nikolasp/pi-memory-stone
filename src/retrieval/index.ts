@@ -33,22 +33,24 @@ function recencyDecay(createdAt: number): number {
 
 // ─── Query builder ──────────────────────────────────────────────────
 
-export function buildSearchQuery(
-  userPrompt: string,
-  recentFiles: string[] = [],
-): string {
-  const parts: string[] = [];
-
+export function buildSearchQuery(userPrompt: string): string {
   // User prompt terms (take first ~200 chars)
-  parts.push(userPrompt.slice(0, 200));
+  return userPrompt.slice(0, 200);
+}
 
-  // Recent files (just filenames, not full paths)
-  for (const f of recentFiles.slice(0, 5)) {
-    const basename = f.split("/").pop() || f;
-    parts.push(basename);
+function recentFileSearchQuery(recentFiles: string[]): string {
+  const terms = new Set<string>();
+
+  for (const file of recentFiles) {
+    const baseName = file.split(/[\\/]/).pop()?.trim();
+    if (!baseName) continue;
+
+    const stem = baseName.replace(/\.[^.]+$/, "");
+    const term = stem.length >= 3 ? stem : baseName;
+    if (term.length >= 3) terms.add(term);
   }
 
-  return parts.join(" ");
+  return Array.from(terms).slice(0, 10).join(" ");
 }
 
 // ─── Ranking ────────────────────────────────────────────────────────
@@ -63,8 +65,12 @@ export function rankAndFilter(
   records: (RecordRow & { rank: number })[],
   currentProjectId: string | null,
   crossProjectEnabled: boolean,
+  recentFiles: string[] = [],
 ): RankedResult[] {
   const results: RankedResult[] = [];
+
+  // Pre-compute recent file basenames for fast matching
+  const recentBaseNames = new Set(recentFiles.map((f) => f.split("/").pop()?.toLowerCase()).filter(Boolean) as string[]);
 
   for (const rec of records) {
     // Skip non-active records
@@ -86,6 +92,18 @@ export function rankAndFilter(
     if (rec.project_id && currentProjectId && rec.project_id === currentProjectId) {
       score *= 1.5;
       reasons.push("same-project");
+    }
+
+    // Recent file boost: prefer records that mention files the user recently touched
+    if (recentBaseNames.size > 0) {
+      const recordText = rec.text.toLowerCase();
+      for (const baseName of recentBaseNames) {
+        if (recordText.includes(baseName)) {
+          score *= 1.3;
+          reasons.push("recent-file");
+          break;
+        }
+      }
     }
 
     // Global preference boost
@@ -143,13 +161,43 @@ export function retrieve(
   const limit = normalizeRetrievalLimit(opts?.limit, config.maxInjectedRecords);
   const crossProject = opts?.crossProjectEnabled ?? config.crossProjectEnabled;
 
-  const query = buildSearchQuery(userPrompt, recentFiles);
+  const query = buildSearchQuery(userPrompt);
 
   // Get more candidates than needed (ranking will filter), but keep local work bounded.
   const candidateLimit = Math.min(MAX_CANDIDATE_LIMIT, limit * 10);
-  const candidates = searchRecordsFts(query, candidateLimit, opts?.kindFilter, opts?.scopeFilter);
+  const promptCandidates = searchRecordsFts(
+    query,
+    candidateLimit,
+    opts?.kindFilter,
+    opts?.scopeFilter,
+    currentProjectId ?? undefined,
+  );
 
-  const ranked = rankAndFilter(candidates, currentProjectId, crossProject);
+  // Recent-file matches need their own candidate query. Applying a boost after
+  // FTS selection is not enough: memories that only match a recently touched
+  // file would otherwise never reach rankAndFilter().
+  const recentQuery = recentFileSearchQuery(recentFiles);
+  const recentCandidates = recentQuery
+    ? searchRecordsFts(
+        recentQuery,
+        candidateLimit,
+        opts?.kindFilter,
+        opts?.scopeFilter,
+        currentProjectId ?? undefined,
+        undefined,
+        true,
+      )
+    : [];
+
+  const candidatesById = new Map<string, RecordRow & { rank: number }>();
+  for (const candidate of [...promptCandidates, ...recentCandidates]) {
+    const existing = candidatesById.get(candidate.id);
+    if (!existing || candidate.rank < existing.rank) {
+      candidatesById.set(candidate.id, candidate);
+    }
+  }
+
+  const ranked = rankAndFilter(Array.from(candidatesById.values()), currentProjectId, crossProject, recentFiles);
 
   // Return top results
   return ranked.slice(0, limit);

@@ -20,6 +20,52 @@ import { getProjectId } from "../config/index.js";
 
 type AgentEndEvent = unknown;
 
+interface TimestampedEntry {
+  timestamp?: string | number;
+  [key: string]: any;
+}
+
+/**
+ * Parse entry timestamp, handling both numeric (ms), numeric strings,
+ * and ISO string formats.
+ * Returns NaN if timestamp is invalid or missing.
+ */
+function entryTimeMs(entry: TimestampedEntry): number {
+  if (entry.timestamp == null) return NaN;
+  if (typeof entry.timestamp === "number") {
+    return Number.isFinite(entry.timestamp) ? entry.timestamp : NaN;
+  }
+  if (typeof entry.timestamp === "string") {
+    // Handle numeric strings (e.g., "1700000000000" or "1700000000000.0"
+    // from SQLite TEXT affinity when a number was stored)
+    const numeric = Number(entry.timestamp);
+    if (Number.isFinite(numeric) && numeric > 86400000) return numeric;
+    const parsed = Date.parse(entry.timestamp);
+    return Number.isFinite(parsed) ? parsed : NaN;
+  }
+  return NaN;
+}
+
+/**
+ * Normalize a timestamp for storage as an ISO string.
+ * Handles numeric ms, ISO strings, and null/undefined.
+ */
+function normalizeTimestampForStorage(ts: string | number | null | undefined): string {
+  if (ts == null) return new Date().toISOString();
+  if (typeof ts === "number" && Number.isFinite(ts)) {
+    return new Date(ts).toISOString();
+  }
+  if (typeof ts === "string") {
+    const numeric = Number(ts);
+    if (Number.isFinite(numeric) && numeric > 86400000) {
+      return new Date(numeric).toISOString();
+    }
+    const parsed = Date.parse(ts);
+    if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
+  }
+  return new Date().toISOString();
+}
+
 // ─── Index a session from agent_end ─────────────────────────────────
 
 export async function indexSessionOnAgentEnd(
@@ -62,7 +108,7 @@ export async function indexSessionOnAgentEnd(
     // Find new entries since last index. Prefer timestamps so this stays correct
     // even if SessionManager branch ordering changes; fall back to root-to-leaf slicing.
     const lastIndexedTimestamp = prevState?.last_indexed_entry_timestamp
-      ? Date.parse(prevState.last_indexed_entry_timestamp)
+      ? entryTimeMs({ timestamp: prevState.last_indexed_entry_timestamp })
       : NaN;
     const lastIndexedIndex = lastIndexedId
       ? branch.findIndex((entry) => entry.id === lastIndexedId)
@@ -71,7 +117,7 @@ export async function indexSessionOnAgentEnd(
     if (lastIndexedId) {
       if (Number.isFinite(lastIndexedTimestamp)) {
         const timestampEntries = branch.filter((entry) => {
-          const ts = entry.timestamp ? Date.parse(entry.timestamp) : NaN;
+          const ts = entryTimeMs(entry);
           return Number.isFinite(ts) && ts > lastIndexedTimestamp;
         });
         newEntries = timestampEntries.length > 0 || lastIndexedIndex < 0
@@ -123,7 +169,7 @@ export async function indexSessionOnAgentEnd(
     // Store records
     for (const payload of recordPayloads) {
       try {
-        const recordId = upsertRecord({
+        upsertRecord({
           kind: payload.kind,
           scope: payload.scope,
           project_id: projectId,
@@ -162,8 +208,8 @@ export async function indexSessionOnAgentEnd(
 
     // Update index state
     const lastEntry = newEntries.reduce((latest, entry) => {
-      const latestTs = latest?.timestamp ? Date.parse(latest.timestamp) : NaN;
-      const entryTs = entry.timestamp ? Date.parse(entry.timestamp) : NaN;
+      const latestTs = latest ? entryTimeMs(latest) : NaN;
+      const entryTs = entryTimeMs(entry);
       if (!Number.isFinite(latestTs) && !Number.isFinite(entryTs)) return entry;
       if (!Number.isFinite(latestTs)) return entry;
       if (!Number.isFinite(entryTs)) return latest;
@@ -173,7 +219,7 @@ export async function indexSessionOnAgentEnd(
       session_file: sessionFile,
       session_id: sessionId,
       last_indexed_entry_id: lastEntry?.id ?? prevState?.last_indexed_entry_id ?? undefined,
-      last_indexed_entry_timestamp: lastEntry?.timestamp ?? new Date().toISOString(),
+      last_indexed_entry_timestamp: normalizeTimestampForStorage(lastEntry?.timestamp),
       file_mtime: fileMtime,
       file_size: fileSize,
       branch_leaf_id: leafId ?? undefined,
